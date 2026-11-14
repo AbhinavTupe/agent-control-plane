@@ -1,11 +1,8 @@
-import asyncio
 import os
-import sys
-
 import uvicorn
 
-if sys.platform == "win32":
-    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
-
 if __name__ == "__main__":
-    uvicorn.run("server.main:app", host="127.0.0.1", port=int(os.getenv("ACP_PORT", "8787")))
+    # psycopg async needs a SelectorEventLoop. uvicorn on Windows defaults to ProactorEventLoop and
+    # ignores asyncio event loop policies; a custom loop string is used as the loop factory.
+    uvicorn.run("server.main:app", host="127.0.0.1", port=int(os.getenv("ACP_PORT", "8787")),
+                loop="asyncio:SelectorEventLoop")

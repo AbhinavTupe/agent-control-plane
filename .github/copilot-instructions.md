@@ -34,7 +34,7 @@ python -m pytest -q               # policy tests
 - `PreToolUse` reply uses `permissionDecision: allow|deny|ask` and runs BEFORE permission checks, so it can enforce deny even in bypass mode.
 - Exit 2 blocks; exit 1 does NOT block. Our script always exits 0.
 - pgvector DDL works on `pgvector/pgvector:pg16`.
-- Windows needs the selector event loop (`server/run.py`).
+- Windows: uvicorn 0.54 uses ProactorEventLoop and ignores loop policies; psycopg async needs SelectorEventLoop; server/run.py passes loop='asyncio:SelectorEventLoop'.
 - Host port is 5435 because 5432 conflicts on dev machines.
 
 ## UNVERIFIED — test live, record in docs/day1-findings.md
