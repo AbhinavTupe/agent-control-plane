@@ -12,7 +12,7 @@ import hmac
 import os
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
-from typing import Literal
+from typing import Callable, Literal
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from psycopg.rows import dict_row
@@ -89,6 +89,55 @@ async def hook(request: Request):
     return await _permission(request, p, sid)
 
 
+@app.post("/hook/copilot")
+async def copilot_hook(request: Request):
+    p = await request.json()
+    pool = request.app.state.pool
+    sid = p.get("sessionId") or "unknown"
+    original_tool = p.get("toolName") or ""
+    tool_key = original_tool.lower()
+    tool_name = {
+        "powershell": "Bash",
+        "bash": "Bash",
+        "apply_patch": "Write",
+        "edit": "Write",
+        "create": "Write",
+    }.get(tool_key, original_tool)
+    tool_args = p.get("toolArgs") or {}
+    if tool_key in {"powershell", "bash"}:
+        tool_input = {"command": tool_args.get("command", "")}
+    else:
+        tool_input = tool_args
+
+    async with pool.connection() as conn:
+        await conn.execute(
+            UPSERT_SESSION,
+            (sid, p.get("cwd"), None, "active" if tool_key == "ask_user" else "waiting"),
+        )
+        await conn.execute(
+            "INSERT INTO events (session_id, kind, tool_name, payload) VALUES (%s, %s, %s, %s)",
+            (sid, "PreToolUse", original_tool, Jsonb(p)),
+        )
+
+    if tool_key == "ask_user":
+        return {}
+    normalized = {"tool_name": tool_name, "tool_input": tool_input}
+    classification_tool = "PowerShell" if tool_key == "powershell" else None
+    return await _permission(
+        request, normalized, sid, response=copilot_perm_response,
+        classification_tool=classification_tool,
+    )
+
+
+def copilot_perm_response(behavior: str, message: str | None = None) -> dict:
+    if behavior == "allow":
+        return {"permissionDecision": "allow"}
+    response = {"permissionDecision": "deny"}
+    if message:
+        response["permissionDecisionReason"] = message
+    return response
+
+
 async def _set_active(pool, sid: str) -> None:
     async with pool.connection() as conn:
         await conn.execute(
@@ -107,11 +156,17 @@ async def _expire(pool, aid: int, who: str) -> bool:
         return cur.rowcount == 1
 
 
-async def _permission(request: Request, p: dict, sid: str) -> dict:
+async def _permission(
+    request: Request,
+    p: dict,
+    sid: str,
+    response: Callable[[str, str | None], dict] = perm_response,
+    classification_tool: str | None = None,
+) -> dict:
     pool = request.app.state.pool
     tool = p.get("tool_name") or ""
     tin = p.get("tool_input") or {}
-    verdict = classify(tool, tin)
+    verdict = classify(classification_tool or tool, tin)
     initial = {"allow": "allowed", "deny": "denied"}.get(verdict.action, "pending")
     decided = initial != "pending"
     async with pool.connection() as conn:
@@ -126,10 +181,10 @@ async def _permission(request: Request, p: dict, sid: str) -> dict:
 
     if initial == "allowed":
         await _set_active(pool, sid)
-        return perm_response("allow")
+        return response("allow")
     if initial == "denied":
         await _set_active(pool, sid)
-        return perm_response("deny", f"Blocked by policy: {verdict.reason}")
+        return response("deny", f"Blocked by policy: {verdict.reason}")
 
     loop = asyncio.get_running_loop()
     deadline = loop.time() + WAIT_SECONDS
@@ -142,7 +197,7 @@ async def _permission(request: Request, p: dict, sid: str) -> dict:
         if loop.time() >= deadline:
             if await _expire(pool, aid, "timeout"):
                 await _set_active(pool, sid)
-                return {}  # no opinion: Claude Code shows its own prompt
+                return {}
             continue  # a human decided at the last moment; re-read
         if await request.is_disconnected():
             await _expire(pool, aid, "client_gone")
@@ -151,8 +206,8 @@ async def _permission(request: Request, p: dict, sid: str) -> dict:
 
     await _set_active(pool, sid)
     if row["status"] == "allowed":
-        return perm_response("allow")
-    return perm_response("deny", row["reason"] or "Denied by user")
+        return response("allow")
+    return response("deny", row["reason"] or "Denied by user")
 
 
 @app.get("/sessions")

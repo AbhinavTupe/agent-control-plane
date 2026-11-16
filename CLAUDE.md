@@ -1,3 +1,4 @@
+<!-- Copy of CLAUDE.md for GitHub Copilot (it auto-loads this path). Keep both files in sync. -->
 # agent-control-plane
 
 One local dashboard to see every running AI coding agent, answer their permission prompts from one inbox, and auto-triage by risk. Postgres + pgvector. Portfolio project (AI + backend roles).
@@ -36,11 +37,16 @@ python -m pytest -q               # policy tests
 - Windows: uvicorn 0.54 uses ProactorEventLoop and ignores loop policies; psycopg async needs SelectorEventLoop; server/run.py passes loop='asyncio:SelectorEventLoop'.
 - Host port is 5435 because 5432 conflicts on dev machines.
 
-## UNVERIFIED — test live, record in docs/day1-findings.md
-1. Is `matcher: "*"` accepted for PermissionRequest, or must it be `""`?
-2. Does Claude Code's question tool (AskUserQuestion) fire PermissionRequest/PreToolUse, and can a hook answer it? If not, fallback = tmux send-keys.
-3. Does answering in the terminal while a hook is waiting cancel the hook (we handle disconnect as `client_gone`)?
-4. Real `tool_input` shapes for Write/Edit/Bash in `events.payload`.
+## Copilot hook — live verification
+- `preToolUse` payload fields are camelCase: `cwd`, `sessionId`, `toolName`, `toolArgs`, `timestamp`, and `toolCallId`. There is no model field.
+- `ask_user` also fires the hook with `toolArgs` containing `message` and `requestedSchema` enum. Answering it from the hook is untested.
+- Deny works: Copilot shows "Denied by preToolUse hook: <reason>".
+- Pending then human allow works: the command ran after approval.
+- Auto-allow (`git status`) works; `decided_by=policy`.
+- After 45 seconds, the hook returns `{}`, Copilot shows its own prompt, and the row is expired/timeout.
+- Chained commands (`;` or `|`) arrive as one string; any deny pattern blocks the whole line.
+- The hook loads only if the VS Code workspace root is the folder containing `.github/hooks`.
+- Server-down behavior is untested.
 
 ## Known limitation
 `PermissionRequest` only fires when Claude Code would have prompted anyway. To enforce blocks on commands the user's settings already allow, add a `PreToolUse` hook (Step 3).
