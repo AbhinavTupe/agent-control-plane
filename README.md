@@ -28,8 +28,11 @@ The Copilot hook sends its `preToolUse` request to the local API. The policy eit
 ## Features
 
 - **Policy engine:** deny rules run before auto-allow rules. Safe-command recognition handles quoted separators and command chains; all unrecognized or uncertain actions require human review.
+- **Question cards:** `ask_user` questions appear in the dashboard with their message and answer choices. The chosen answer is returned by denying the tool call with a reason containing the answer.
+- **Agents panel:** `/agents` lists sessions from the last 24 hours with agent, folder, state, pending count, and last tool.
 - **Dashboard:** vanilla HTML/CSS/JavaScript served by FastAPI, with pending approvals, Approve/Deny controls, recent decisions, sessions, and 1-second polling.
 - **Precedent memory:** FastEmbed `BAAI/bge-small-en-v1.5` creates 384-dimensional embeddings stored in pgvector with an HNSW cosine index. Similarity results use human and seed decisions only. They are advisory; the policy engine decides first.
+- **Evaluation:** [Policy evaluation](docs/eval.md) reports results for 112 hand-written cases: after tightening, 0 unsafe auto-allows and 0 over-blocks. The first run auto-denied 22/35 expected-deny cases; six rule gaps were fixed, and seven cases were relabeled to ask after review. This is a regression suite written by the author, not an independent benchmark.
 
 ## Quickstart (Windows)
 
@@ -78,15 +81,22 @@ Open <http://127.0.0.1:8787>.
 | Auto-allow | `git status` proceeds and is recorded as decided by policy. |
 | Human approval | A pending command proceeds after approval in the dashboard. |
 | 45-second timeout | The hook returns `{}`; Copilot shows its own prompt and the approval expires. |
+| `ask_user` answer | The hook receives the question message and enum schema. The dashboard shows a Question card; its answer is returned by denying the tool call with reason `The user already answered ... Answer: {json}`. Copilot replied "You chose: blue" without its own question box. |
+| `ask_user` timeout | With no answer within 50 seconds (`ACP_QUESTION_SECONDS`), the hook returns `{}` and Copilot shows its own question box. |
+| Agents panel | `/agents` lists sessions from the last 24 hours with agent, folder, state, pending count, and last tool. Two concurrent Copilot chats were both shown as `waiting`. |
+| Tool names | Observed Copilot tools include `apply_patch`, `ask_user`, `bash`, `powershell`, `rg`, `view`, `skill`, `stop_powershell`, `tool_search_tool`, and Pylance tools. |
 | Similar-decision cards | Precedents appear on a pending card (verified live, incl. retry while the embedding is computed). |
-| Automated tests | `pytest -q`: 137 passed. |
+| Policy evaluation | 112 hand-written cases; the first run auto-denied 22/35 expected-deny cases, six rule gaps were fixed, and seven cases were relabeled to ask after review. After tightening: 0 unsafe auto-allows and 0 over-blocks. This is an author-written regression suite, not an independent benchmark. |
+| Automated tests | `.venv\Scripts\python.exe -m pytest -q`: 229 passed. |
 
 ## Limitations
 
 - Only GitHub Copilot in VS Code has been verified live; Copilot hooks are a preview feature.
 - Tested on Windows only.
 - A Claude Code hook adapter exists, but it has not been verified live.
-- Copilot's `ask_user` tool is logged, but its question cannot yet be answered from the dashboard.
+- Returning an `ask_user` answer denies the tool call with the answer in its reason. Copilot's UI labels this "Ask User failed" (cosmetic); this relies on the model following the message and has been tested in one setup only.
+- Only Copilot is verified for the Agents panel; the Claude Code adapter is untested.
+- `rg` and `view` are read-only, but sensitive paths still ask for approval. Unknown tools always ask, so some Copilot tools still wait for a human.
 - Dashboard updates use polling, not push notifications.
 - This is a single-user local service. `ACP_TOKEN` is optional; the dashboard does not send the token, so enabling it also requires a way to authenticate dashboard API requests.
 - The 81 seed decisions are synthetic and hand-labeled.
@@ -94,8 +104,6 @@ Open <http://127.0.0.1:8787>.
 
 ## Roadmap
 
-- Answer `ask_user` questions from the dashboard.
 - Replace polling with Postgres LISTEN/NOTIFY and WebSockets.
 - Add per-repository YAML policy.
 - Add an LLM judge for ambiguous cases.
-- Evaluate policy precision and recall.

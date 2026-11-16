@@ -39,7 +39,11 @@ python -m pytest -q               # policy tests
 
 ## Copilot hook — live verification
 - `preToolUse` payload fields are camelCase: `cwd`, `sessionId`, `toolName`, `toolArgs`, `timestamp`, and `toolCallId`. There is no model field.
-- `ask_user` also fires the hook with `toolArgs` containing `message` and `requestedSchema` enum. Answering it from the hook is untested.
+- `ask_user` fires the hook with `toolArgs` containing the question `message` and `requestedSchema` enum. The dashboard shows a Question card. The chosen answer is returned by denying the tool call with reason `The user already answered ... Answer: {json}`; Copilot replied "You chose: blue" without its own question box.
+- If no answer arrives within 50 seconds (`ACP_QUESTION_SECONDS`), the hook returns `{}` and Copilot shows its own question box.
+- The `ask_user` answer flow relies on the model following the message and was tested in one setup only. Copilot labels the denied call "Ask User failed" (cosmetic).
+- `/agents` lists sessions from the last 24 hours with agent, folder, state (`waiting`/`active`/`idle`/`inactive`), pending count, and last tool. Two concurrent Copilot chats were both shown as `waiting`.
+- Copilot tool names seen: `apply_patch`, `ask_user`, `bash`, `powershell`, `rg`, `view`, `skill`, `stop_powershell`, `tool_search_tool`, and Pylance tools. `rg` and `view` are read-only; sensitive paths still ask. Unknown tools always ask.
 - Deny works: Copilot shows "Denied by preToolUse hook: <reason>".
 - Pending then human allow works: the command ran after approval.
 - Auto-allow (`git status`) works; `decided_by=policy`.
@@ -52,8 +56,9 @@ python -m pytest -q               # policy tests
 `PermissionRequest` only fires when Claude Code would have prompted anyway. To enforce blocks on commands the user's settings already allow, add a `PreToolUse` hook (Step 3).
 
 ## Roadmap
-1. [x] Walking skeleton: schema, hook receiver, rules, approvals API, smoke test. **Live verification with real Claude Code = remaining Step 1 work.**
-2. [ ] React inbox + live updates (replace polling with Postgres LISTEN/NOTIFY + WebSocket)
-3. [ ] PreToolUse enforcement + per-repo YAML policy + audit view
-4. [ ] pgvector precedent memory: embed `approvals.summary` (384-dim), HNSW cosine search, "similar past decisions" badge; seed ~100 labeled commands
-5. [ ] LLM judge for ambiguous cases + eval (precision/recall) + README numbers + demo video
+1. [x] Walking skeleton: schema, hook receiver, rules, approvals API, smoke test. Copilot live verification is recorded above; the Claude Code adapter remains untested.
+2. [x] Dashboard Question cards for `ask_user` answers and `/agents` session view.
+3. [ ] React inbox + live updates (replace polling with Postgres LISTEN/NOTIFY + WebSocket)
+4. [ ] PreToolUse enforcement + per-repo YAML policy + audit view
+5. [ ] pgvector precedent memory: embed `approvals.summary` (384-dim), HNSW cosine search, "similar past decisions" badge; seed ~100 labeled commands
+6. [ ] LLM judge for ambiguous cases + eval (precision/recall) + README numbers + demo video
