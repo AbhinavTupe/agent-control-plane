@@ -61,6 +61,31 @@ _PS_DOWNLOAD_PIPE = re.compile(
 _BLOCK = [
     (re.compile(r"\bgit\s+push\b[^\n;&|]*(--force\b(?!-)|\s-[a-zA-Z]*f[a-zA-Z]*(\s|$))"),
      "force push can destroy remote history"),
+    (re.compile(r"\b(?:Stop-Computer|Restart-Computer)\b", re.I),
+     "stops or restarts the computer"),
+    (re.compile(r"\bshutdown(?:\.exe)?\b[^\r\n]*(?<!\S)/[srp](?=\s|$)", re.I),
+     "shuts down or restarts the computer"),
+    (re.compile(
+        r"\bSet-MpPreference\b[^\r\n]*(?<!\S)-Disable[\w-]*(?:\s*:\s*|\s+)\$?true\b", re.I,
+    ), "disables Microsoft Defender protection"),
+    (re.compile(
+        r"\bnetsh(?:\.exe)?\s+advfirewall\s+set\b[^\r\n]*\bstate\s+off\b", re.I,
+    ), "disables a Windows firewall profile"),
+    (re.compile(
+        r"\bSet-NetFirewallProfile\b[^\r\n]*(?<!\S)-Enabled(?:\s*:\s*|\s+)\$?false\b", re.I,
+    ), "disables a Windows firewall profile"),
+    (re.compile(
+        r"\breg(?:\.exe)?\s+delete\b[^\r\n]*\b(?:HKLM|HKEY_LOCAL_MACHINE)\\", re.I,
+    ), "deletes machine-wide registry data"),
+    (re.compile(
+        r"\bterraform(?:\.exe)?\s+destroy\b[^\r\n]*(?<!\S)-auto-approve(?:\s|=|$)", re.I,
+    ), "destroys infrastructure without confirmation"),
+    (re.compile(
+        r"(?:^|[;&|]\s*)(?:cmd(?:\.exe)?\s+/c\s+)?(?:del|erase)\b"
+        r"(?=[^\r\n]*?(?<!\S)/s(?=\s|$))"
+        r"(?=[^\r\n]*?(?<![\w])[A-Z]:[\\/])[^\r\n]*",
+        re.I,
+    ), "recursively deletes an absolute drive path"),
     (re.compile(r"\b(curl|wget)\b[^\n]*\|\s*(sudo\s+)?(ba|z|da)?sh\b"),
      "piping a download into a shell"),
     (re.compile(r"\bmkfs(\.\w+)?\b"), "formats a filesystem"),

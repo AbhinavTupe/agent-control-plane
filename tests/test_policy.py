@@ -151,6 +151,66 @@ def test_powershell_unmatched_risky_commands_ask(cmd):
     assert powershell(cmd).action == "ask", cmd
 
 
+@pytest.mark.parametrize("cmd", [
+    "Stop-Computer -Force",
+    "rEsTaRt-cOmPuTeR -Force",
+    "shutdown /s /t 0",
+    "SHUTDOWN.EXE /R",
+    "shutdown /p",
+    "Set-MpPreference -DisableRealtimeMonitoring $true",
+    "SET-MPPREFERENCE -DisableIOAVProtection:$True",
+    "netsh advfirewall set allprofiles state off",
+    "Set-NetFirewallProfile -Profile Public -Enabled False",
+    r"reg delete HKLM\SOFTWARE\Policies\Run /f",
+    r'reg.exe delete "HKEY_LOCAL_MACHINE\Software\Policies" /f',
+    "terraform destroy -auto-approve",
+    "terraform destroy -target=module.cache -AUTO-APPROVE",
+    r"del /s /q C:\Users\Public\*",
+    r"ERASE D:\temp\* /s /q",
+    r"cmd /c del /s /q C:\Temp\*",
+])
+@pytest.mark.parametrize("classify_shell", [bash, powershell])
+def test_system_and_data_destruction_commands_are_denied(classify_shell, cmd):
+    verdict = classify_shell(cmd)
+    assert (verdict.action, verdict.risk) == ("deny", "high"), cmd
+
+
+@pytest.mark.parametrize("cmd", [
+    "Get-MpPreference",
+    "Set-MpPreference -DisableRealtimeMonitoring $false",
+    "netsh advfirewall show allprofiles",
+    r"reg query HKLM\SOFTWARE\Microsoft",
+    r"reg add HKLM\SOFTWARE\Example /v Setting /t REG_DWORD /d 1",
+    "terraform plan",
+    "terraform destroy",
+    "shutdown /?",
+    r"del /s /q .\build",
+    "Get-Service BITS",
+    "kubectl get ns",
+    "git reset --hard",
+    "Set-NetFirewallProfile -Profile Public -Enabled True",
+    r"erase /s /q .\build",
+])
+@pytest.mark.parametrize("classify_shell", [bash, powershell])
+def test_system_command_lookalikes_are_not_denied(classify_shell, cmd):
+    assert classify_shell(cmd).action == "ask", cmd
+
+
+@pytest.mark.parametrize("cmd", [
+    ("DROP DATABASE analytics;", "high"),
+    ("TRUNCATE TABLE audit_events;", "high"),
+    ("git clean -fd", "high"),
+    ("git reset --hard HEAD~4", "high"),
+    ("kubectl delete namespace staging", "medium"),
+    ("aws s3 rm s3://archive-prod --recursive", "high"),
+    ("sc.exe stop BITS", "medium"),
+])
+def test_context_dependent_destructive_commands_still_ask(cmd):
+    command, expected_risk = cmd
+    verdict = bash(command)
+    assert (verdict.action, verdict.risk) == ("ask", expected_risk), command
+
+
 def test_non_bash_tools():
     assert classify("Read", {"file_path": "src/app.py"}).action == "allow"
     assert classify("Read", {"file_path": "/home/u/.env"}).action == "ask"
