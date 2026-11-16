@@ -107,3 +107,7 @@ Open <http://127.0.0.1:8787>.
 - Replace polling with Postgres LISTEN/NOTIFY and WebSockets.
 - Add per-repository YAML policy.
 - Add an LLM judge for ambiguous cases.
+
+## License
+
+MIT. See LICENSE.
