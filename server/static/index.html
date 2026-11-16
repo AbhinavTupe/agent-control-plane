@@ -1,0 +1,291 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Agent Control Plane</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+      background: #10141c;
+      color: #e6eaf2;
+      --panel: #191f2a;
+      --border: #2b3443;
+      --muted: #9aa7ba;
+      --accent: #82aaff;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; }
+    main { max-width: 1200px; margin: 0 auto; padding: 28px 20px 48px; }
+    header { display: flex; align-items: center; justify-content: space-between; gap: 20px; margin-bottom: 28px; }
+    h1 { font-size: 1.65rem; margin: 0; letter-spacing: -.03em; }
+    h2 { font-size: 1.1rem; margin: 0 0 14px; }
+    .status-line, .counts { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; color: var(--muted); }
+    .status-indicator { display: inline-flex; align-items: center; gap: 8px; }
+    .dot { width: 9px; height: 9px; border-radius: 50%; background: #778196; }
+    .dot.online { background: #55d68b; box-shadow: 0 0 10px #55d68b66; }
+    .count { color: #e6eaf2; font-weight: 650; }
+    section { margin-top: 26px; }
+    .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 340px), 1fr)); gap: 12px; }
+    .card, .table-wrap { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; }
+    .card { padding: 16px; min-width: 0; }
+    .card-top, .card-meta, .actions { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+    .summary { display: block; white-space: pre-wrap; overflow-wrap: anywhere; font: 13px/1.5 ui-monospace, SFMono-Regular, Consolas, monospace; margin: 12px 0; }
+    .card-meta { justify-content: flex-start; flex-wrap: wrap; color: var(--muted); font-size: .87rem; }
+    .tool { color: #c9d5ea; font-weight: 600; }
+    .badge { display: inline-block; border-radius: 999px; padding: 2px 9px; font-size: .78rem; font-weight: 700; text-transform: uppercase; }
+    .risk-low { background: #163d32; color: #7ce0b1; }
+    .risk-medium { background: #493919; color: #f3cb76; }
+    .risk-high { background: #4a252b; color: #ff9a9f; }
+    .risk-unknown { background: #303949; color: #c4cede; }
+    .actions { margin-top: 14px; justify-content: flex-start; }
+    button { border: 0; border-radius: 6px; padding: 7px 12px; cursor: pointer; color: #10141c; background: #7ce0b1; font: inherit; font-weight: 700; }
+    button.deny { color: #fff; background: #bb5965; }
+    button:disabled { opacity: .55; cursor: wait; }
+    input { min-width: 100px; flex: 1; background: #111720; border: 1px solid var(--border); border-radius: 6px; color: inherit; padding: 7px 9px; font: inherit; }
+    .table-wrap { overflow-x: auto; }
+    table { width: 100%; border-collapse: collapse; text-align: left; }
+    th, td { padding: 10px 12px; border-bottom: 1px solid var(--border); vertical-align: top; }
+    th { color: var(--muted); font-size: .8rem; font-weight: 600; white-space: nowrap; }
+    tr:last-child td { border-bottom: 0; }
+    td.summary-cell { min-width: 230px; white-space: pre-wrap; overflow-wrap: anywhere; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: .85rem; }
+    .muted, .empty { color: var(--muted); }
+    .empty { padding: 18px; text-align: center; }
+    #error { color: #ff9a9f; min-height: 1.5em; }
+    @media (max-width: 620px) {
+      main { padding: 20px 12px 36px; }
+      header { align-items: flex-start; flex-direction: column; }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <h1>Agent Control Plane</h1>
+      <div>
+        <div class="status-line">
+          <span class="status-indicator"><span id="health-dot" class="dot"></span><span id="health">Checking server…</span></span>
+          <span class="counts"><span><span id="pending-count" class="count">0</span> pending</span><span><span id="session-count" class="count">0</span> sessions</span></span>
+        </div>
+        <div id="error" role="status" aria-live="polite"></div>
+      </div>
+    </header>
+
+    <section aria-labelledby="pending-heading">
+      <h2 id="pending-heading">Pending approvals</h2>
+      <div id="pending-list" class="cards"><p class="empty">Loading approvals…</p></div>
+    </section>
+
+    <section aria-labelledby="recent-heading">
+      <h2 id="recent-heading">Recent decisions</h2>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Time</th><th>Summary</th><th>Risk</th><th>Status</th><th>Decided by</th><th>Reason</th></tr></thead>
+          <tbody id="recent-list"><tr><td class="empty" colspan="6">Loading decisions…</td></tr></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section aria-labelledby="sessions-heading">
+      <h2 id="sessions-heading">Sessions</h2>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>ID</th><th>Working directory</th><th>Status</th><th>Last seen</th></tr></thead>
+          <tbody id="sessions-list"><tr><td class="empty" colspan="4">Loading sessions…</td></tr></tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+  <script>
+    const pendingList = document.getElementById("pending-list");
+    const recentList = document.getElementById("recent-list");
+    const sessionsList = document.getElementById("sessions-list");
+    const errorLine = document.getElementById("error");
+    let polling = false;
+    let refreshQueued = false;
+
+    function text(value) {
+      return value == null ? "" : String(value);
+    }
+
+    function cell(row, value, className) {
+      const td = document.createElement("td");
+      if (className) td.className = className;
+      td.textContent = text(value);
+      row.appendChild(td);
+      return td;
+    }
+
+    function badge(value) {
+      const element = document.createElement("span");
+      const risk = text(value).toLowerCase();
+      element.className = "badge risk-" + (["low", "medium", "high"].includes(risk) ? risk : "unknown");
+      element.textContent = text(value) || "unknown";
+      return element;
+    }
+
+    function formatTime(value) {
+      if (!value) return "—";
+      const date = new Date(value);
+      return Number.isNaN(date.getTime()) ? text(value) : date.toLocaleString();
+    }
+
+    function renderPending(items) {
+      document.getElementById("pending-count").textContent = String(items.length);
+      pendingList.replaceChildren();
+      if (!items.length) {
+        const empty = document.createElement("p");
+        empty.className = "empty";
+        empty.textContent = "No pending approvals";
+        pendingList.appendChild(empty);
+        return;
+      }
+
+      for (const approval of items) {
+        const card = document.createElement("article");
+        card.className = "card";
+        const top = document.createElement("div");
+        top.className = "card-top";
+        const tool = document.createElement("span");
+        tool.className = "tool";
+        tool.textContent = text(approval.tool_name);
+        top.append(tool, badge(approval.risk));
+        card.appendChild(top);
+
+        const summary = document.createElement("code");
+        summary.className = "summary";
+        summary.textContent = text(approval.summary);
+        card.appendChild(summary);
+
+        const meta = document.createElement("div");
+        meta.className = "card-meta";
+        const session = document.createElement("span");
+        session.textContent = "Session " + text(approval.session_id).slice(0, 8);
+        const created = new Date(approval.created_at).getTime();
+        const age = document.createElement("span");
+        age.textContent = Number.isNaN(created) ? "Age unavailable" : Math.max(0, Math.floor((Date.now() - created) / 1000)) + "s ago";
+        meta.append(session, age);
+        card.appendChild(meta);
+
+        const actions = document.createElement("div");
+        actions.className = "actions";
+        const reason = document.createElement("input");
+        reason.type = "text";
+        reason.placeholder = "Optional deny reason";
+        reason.setAttribute("aria-label", "Optional deny reason");
+        const approve = document.createElement("button");
+        approve.textContent = "Approve";
+        approve.addEventListener("click", () => decide(approval.id, "allow", "", actions));
+        const deny = document.createElement("button");
+        deny.className = "deny";
+        deny.textContent = "Deny";
+        deny.addEventListener("click", () => decide(approval.id, "deny", reason.value, actions));
+        actions.append(reason, approve, deny);
+        card.appendChild(actions);
+        pendingList.appendChild(card);
+      }
+    }
+
+    function renderRecent(items) {
+      recentList.replaceChildren();
+      if (!items.length) {
+        const row = recentList.insertRow();
+        cell(row, "No approvals yet", "empty").colSpan = 6;
+        return;
+      }
+      for (const item of items) {
+        const row = recentList.insertRow();
+        cell(row, formatTime(item.decided_at || item.created_at));
+        cell(row, item.summary, "summary-cell");
+        const risk = row.insertCell();
+        risk.appendChild(badge(item.risk));
+        cell(row, item.status);
+        cell(row, item.decided_by);
+        cell(row, item.reason);
+      }
+    }
+
+    function renderSessions(items) {
+      document.getElementById("session-count").textContent = String(items.length);
+      sessionsList.replaceChildren();
+      if (!items.length) {
+        const row = sessionsList.insertRow();
+        cell(row, "No sessions", "empty").colSpan = 4;
+        return;
+      }
+      for (const item of items) {
+        const row = sessionsList.insertRow();
+        cell(row, text(item.id).slice(0, 8));
+        cell(row, item.cwd);
+        cell(row, item.status);
+        cell(row, formatTime(item.last_seen_at));
+      }
+    }
+
+    async function getJson(url) {
+      const response = await fetch(url);
+      if (!response.ok) throw new Error("Request failed: " + response.status);
+      return response.json();
+    }
+
+    async function decide(id, decision, reason, actions) {
+      actions.querySelectorAll("button").forEach(button => { button.disabled = true; });
+      errorLine.textContent = "";
+      try {
+        const body = { decision };
+        if (decision === "deny" && reason.trim()) body.reason = reason.trim();
+        const response = await fetch("/approvals/" + encodeURIComponent(id) + "/decide", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body)
+        });
+        if (response.status !== 409 && !response.ok) throw new Error("Decision failed: " + response.status);
+        await refresh();
+      } catch (error) {
+        errorLine.textContent = text(error.message || error);
+        actions.querySelectorAll("button").forEach(button => { button.disabled = false; });
+      }
+    }
+
+    async function refresh() {
+      if (polling) {
+        refreshQueued = true;
+        return;
+      }
+      polling = true;
+      // This dashboard deliberately does not send ACP_TOKEN; deployments configured with it require authentication outside this page.
+      try {
+        const results = await Promise.allSettled([
+          fetch("/healthz"),
+          getJson("/approvals?status=pending"),
+          getJson("/approvals?status=all&limit=20"),
+          getJson("/sessions")
+        ]);
+        const healthResponse = results[0];
+        const healthy = healthResponse.status === "fulfilled" && healthResponse.value.ok;
+        document.getElementById("health").textContent = healthy ? "Server online" : "Server unavailable";
+        document.getElementById("health-dot").classList.toggle("online", healthy);
+
+        if (results[1].status === "fulfilled") renderPending(results[1].value);
+        if (results[2].status === "fulfilled") renderRecent(results[2].value);
+        if (results[3].status === "fulfilled") renderSessions(results[3].value);
+
+        const failures = results.slice(1).filter(result => result.status === "rejected");
+        errorLine.textContent = failures.length ? "Some dashboard data could not be refreshed." : "";
+      } catch (error) {
+        errorLine.textContent = text(error.message || error);
+      } finally {
+        polling = false;
+        if (refreshQueued) {
+          refreshQueued = false;
+          void refresh();
+        }
+      }
+    }
+
+    refresh();
+    window.setInterval(refresh, 1000);
+  </script>
+</body>
+</html>

@@ -12,9 +12,11 @@ import hmac
 import os
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Callable, Literal
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
+from fastapi.responses import FileResponse
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool
@@ -55,6 +57,11 @@ def require_token(x_acp_token: str = Header(default="")) -> None:
 
 
 app = FastAPI(title="agent-control-plane", lifespan=lifespan, dependencies=[Depends(require_token)])
+
+
+@app.get("/", include_in_schema=False)
+async def dashboard():
+    return FileResponse(Path(__file__).parent / "static" / "index.html")
 
 
 def perm_response(behavior: str, message: str | None = None) -> dict:

@@ -10,6 +10,11 @@ python -m venv .venv
 .venv/Scripts/python -m pip install -r requirements.txt  # Windows
 .venv/bin/python -m pip install -r requirements.txt      # macOS/Linux
 python -m server.run
+```
+
+Open the dashboard at <http://127.0.0.1:8787>.
+
+```bash
 bash scripts/smoke_test.sh                             # 7 checks, simulates Claude Code hooks
 python -m pytest -q
 ```
