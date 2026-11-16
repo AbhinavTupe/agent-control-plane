@@ -19,21 +19,21 @@ class Verdict:
     reason: str
 
 
-# Shell metacharacters: if present we never auto-allow (blocks "ls; rm -rf x").
-_META = re.compile(r"[;&|<>`$\\\n]")
-
-_SAFE_CMD = re.compile(
-    r"^(ls|pwd|whoami|date|which \S+|git (status|diff|log|branch|show)|pytest|"
-    r"python3? -m pytest|npm (test|run (test|lint|build))|pnpm (test|lint|build)|"
-    r"cargo (test|check|build)|go (test|build|vet)|ruff( check)?|mypy|tsc)(\s|$)"
-)
-
-_POWERSHELL_CHAIN = re.compile(r"[;|&>\r\n]")
-_POWERSHELL_SAFE = re.compile(
-    r"^(?:git\s+(?:status|diff|log)|Get-ChildItem|ls|dir|Get-Content|cat|pytest|"
-    r"docker\s+compose\s+ps)(?:\s|$)",
+_SAFE_COMMAND = re.compile(
+    r"^(?:"
+    r"git\s+(?:--no-pager\s+)?(?:status|diff|log|show|branch)(?:\s+--no-pager)?|"
+    r"Get-ChildItem|ls|dir|Get-Content|cat|Select-String|Get-Process|Get-Date|"
+    r"Select-Object|Sort-Object|Measure-Object|Format-Table|Where-Object|pytest|"
+    r"\.venv[\\/]Scripts[\\/]python\.exe\s+-m\s+pytest"
+    r")(\s|$)",
     re.I,
 )
+_GIT_UNSAFE_OPTION = re.compile(
+    r"\bgit\b[^\r\n;&|]*(?:--output(?:=|\s|$)|--ext-diff(?:=|\s|$)|"
+    r"--textconv(?:=|\s|$)|(?<!\S)-o(?=\s|=|$))",
+    re.I,
+)
+_GIT_BRANCH = re.compile(r"^git\s+(?:--no-pager\s+)?branch(?=\s|$)", re.I)
 _PS_REMOVE = re.compile(r"\bRemove-Item\b([^\r\n]*)", re.I)
 _PS_DANGEROUS_TARGET = re.compile(
     r"(?:"
@@ -79,7 +79,7 @@ _HIGH_ASK = [
     (re.compile(r"\b(chmod|chown)\s+-R\b"), "recursive permission change"),
     (re.compile(r"\bnpm\s+publish\b"), "publishes a package"),
     (re.compile(r"\bdocker\s+(system\s+prune|rm\s+-f)"), "removes containers or images"),
-    (re.compile(r"(\.env\b|id_rsa|\.pem\b|\.aws/credentials|\.ssh/)"), "touches secrets or keys"),
+    (re.compile(r"(\.env\b|id_rsa|\.pem\b|\.aws[\\/]+credentials|\.ssh(?:[\\/]|$)|\.git[\\/]|credentials|secrets?)", re.I), "touches secrets or keys"),
 ]
 
 _RM_RECURSIVE = re.compile(r"\brm\b[^\n;&|]*\s(-[a-zA-Z]*[rR][a-zA-Z]*|--recursive)\b")
@@ -87,7 +87,58 @@ _RM_CATASTROPHIC = {"/", "/*", "~", "~/", "~/*", "$HOME", "$HOME/", "*", ".", ".
 
 _READ_ONLY = {"Read", "Glob", "Grep", "LS", "NotebookRead", "TodoWrite"}
 _WRITE = {"Write", "Edit", "MultiEdit", "NotebookEdit"}
-_SENSITIVE_PATH = re.compile(r"(\.env\b|\.git/|id_rsa|\.ssh/|\.pem$|credentials|secrets?)", re.I)
+_SENSITIVE_PATH = re.compile(
+    r"(\.env\b|\.git[\\/]|id_rsa|\.ssh(?:[\\/]|$)|\.pem(?:$|[\\/])|credentials|secrets?)",
+    re.I,
+)
+
+
+def _safe_command_segments(cmd: str) -> list[str] | None:
+    if "$(" in cmd or "<(" in cmd or any(char in cmd for char in "$`<"):
+        return None
+    segments: list[str] = []
+    start = 0
+    quote: str | None = None
+    i = 0
+    while i < len(cmd):
+        char = cmd[i]
+        if quote:
+            if char == quote:
+                quote = None
+            elif char == "\\" and quote == '"' and i + 1 < len(cmd):
+                i += 1
+            elif char == "`" and quote == '"' and i + 1 < len(cmd):
+                i += 1
+        elif char in "'\"":
+            quote = char
+        elif char in "\r\n>&`{}":
+            return None
+        elif char == "$" and cmd[i + 1:i + 2] == "(":
+            return None
+        elif char == "|" and cmd[i + 1:i + 2] == "|":
+            return None
+        elif char in ";|":
+            segment = cmd[start:i].strip()
+            if not segment:
+                return None
+            segments.append(segment)
+            start = i + 1
+        i += 1
+    if quote:
+        return None
+    segment = cmd[start:].strip()
+    if not segment:
+        return None
+    segments.append(segment)
+    for segment in segments:
+        if not _SAFE_COMMAND.match(segment) or _GIT_UNSAFE_OPTION.search(segment):
+            return None
+        branch = _GIT_BRANCH.match(segment)
+        if branch and segment[branch.end():].strip() not in {
+            "", "-a", "-r", "-v", "-vv", "--list", "--show-current",
+        }:
+            return None
+    return segments
 
 
 def _rm_verdict(cmd: str) -> Verdict | None:
@@ -116,7 +167,7 @@ def classify_bash(cmd: str) -> Verdict:
     for rx, why in _HIGH_ASK:
         if rx.search(cmd):
             return Verdict("ask", "high", why)
-    if not _META.search(cmd) and _SAFE_CMD.match(cmd):
+    if _safe_command_segments(cmd):
         return Verdict("allow", "low", "read-only or test command")
     return Verdict("ask", "medium", "needs human review")
 
@@ -142,7 +193,13 @@ def classify_powershell(cmd: str) -> Verdict:
         _PS_EXECUTE.search(cmd) and _PS_DOWNLOAD.search(cmd)
     ):
         return Verdict("deny", "high", "executes downloaded content")
-    if not _POWERSHELL_CHAIN.search(cmd) and _POWERSHELL_SAFE.match(cmd):
+    for rx, why in _BLOCK:
+        if rx.search(cmd):
+            return Verdict("deny", "high", why)
+    for rx, why in _HIGH_ASK:
+        if rx.search(cmd):
+            return Verdict("ask", "high", why)
+    if _safe_command_segments(cmd):
         return Verdict("allow", "low", "read-only or test command")
     return Verdict("ask", "medium", "needs human review")
 

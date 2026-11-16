@@ -103,13 +103,18 @@ async def copilot_hook(request: Request):
     sid = p.get("sessionId") or "unknown"
     original_tool = p.get("toolName") or ""
     tool_key = original_tool.lower()
-    tool_name = {
-        "powershell": "Bash",
-        "bash": "Bash",
-        "apply_patch": "Write",
-        "edit": "Write",
-        "create": "Write",
-    }.get(tool_key, original_tool)
+    if tool_key in {"powershell", "bash"}:
+        tool_name = "Bash"
+        classification_tool = "PowerShell" if tool_key == "powershell" else "Bash"
+    elif tool_key == "view":
+        tool_name = "Read"
+        classification_tool = "Read"
+    elif tool_key in {"apply_patch", "edit", "create"}:
+        tool_name = "Write"
+        classification_tool = "Write"
+    else:
+        tool_name = original_tool
+        classification_tool = "CopilotUnknown"
     tool_args = p.get("toolArgs") or {}
     if tool_key in {"powershell", "bash"}:
         tool_input = {"command": tool_args.get("command", "")}
@@ -129,7 +134,6 @@ async def copilot_hook(request: Request):
     if tool_key == "ask_user":
         return {}
     normalized = {"tool_name": tool_name, "tool_input": tool_input}
-    classification_tool = "PowerShell" if tool_key == "powershell" else None
     return await _permission(
         request, normalized, sid, response=copilot_perm_response,
         classification_tool=classification_tool,
