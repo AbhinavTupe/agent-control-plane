@@ -235,6 +235,8 @@ def _path(tool_input: dict) -> str:
 
 def classify(tool: str, tool_input: dict | None) -> Verdict:
     tin = tool_input or {}
+    if tool == "ask_user":
+        return Verdict("ask", "low", "question for user")
     if tool == "PowerShell":
         return classify_powershell(str(tin.get("command", "")))
     if tool == "Bash":
@@ -260,3 +262,54 @@ def summarize(tool: str, tool_input: dict | None, limit: int = 300) -> str:
     else:
         text = f"{tool} {json.dumps(tin, default=str)}"
     return text[:limit]
+
+
+def question_summary(tool_args: object) -> str:
+    if not isinstance(tool_args, dict):
+        return ""
+    message = tool_args.get("message")
+    return message if isinstance(message, str) else ""
+
+
+def parse_question_fields(tool_args: object) -> list[dict[str, object]]:
+    if not isinstance(tool_args, dict):
+        return []
+    schema = tool_args.get("requestedSchema")
+    if not isinstance(schema, dict):
+        return []
+    properties = schema.get("properties")
+    if not isinstance(properties, dict):
+        return []
+
+    fields = []
+    for name, spec in properties.items():
+        if not isinstance(name, str):
+            continue
+        spec = spec if isinstance(spec, dict) else {}
+        field_type = spec.get("type")
+        if field_type not in {"string", "boolean", "integer", "number"}:
+            field_type = "string"
+        title = spec.get("title")
+        options = spec.get("enum")
+        fields.append({
+            "name": name,
+            "title": title if isinstance(title, str) and title else name,
+            "type": field_type,
+            "enum": [
+                option for option in options
+                if type(option) in {str, bool, int, float}
+            ] if isinstance(options, list) else [],
+        })
+    return fields
+
+
+def question_answer_reply(answer_json: str | None) -> str:
+    answer = answer_json or "{}"
+    return (
+        "The user already answered this question via the control-plane dashboard. "
+        f"Answer: {answer}. Do not ask again; continue using this answer."
+    )
+
+
+def question_declined_reply() -> str:
+    return "The user declined to answer."

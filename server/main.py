@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import hmac
+import json
 import logging
 import os
 from contextlib import asynccontextmanager
@@ -21,14 +22,22 @@ from fastapi.responses import FileResponse
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from .embed import embed, to_pgvector
-from .policy import classify, summarize
+from .policy import (
+    classify,
+    question_answer_reply,
+    question_declined_reply,
+    parse_question_fields,
+    question_summary,
+    summarize,
+)
 
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://acp:acp@127.0.0.1:5435/acp")
 TOKEN = os.getenv("ACP_TOKEN", "")
 WAIT_SECONDS = float(os.getenv("ACP_WAIT_SECONDS", "45"))  # keep below the hook timeout
+QUESTION_SECONDS = float(os.getenv("ACP_QUESTION_SECONDS", "50"))
 SIM_MIN = float(os.getenv("ACP_SIM_MIN", "0.80"))
 POLL_SECONDS = 0.5  # Step 2 replaces polling with LISTEN/NOTIFY
 logger = logging.getLogger(__name__)
@@ -151,6 +160,9 @@ async def copilot_hook(request: Request):
     elif tool_key in {"apply_patch", "edit", "create"}:
         tool_name = "Write"
         classification_tool = "Write"
+    elif tool_key == "ask_user":
+        tool_name = "ask_user"
+        classification_tool = "ask_user"
     else:
         tool_name = original_tool
         classification_tool = "CopilotUnknown"
@@ -163,15 +175,13 @@ async def copilot_hook(request: Request):
     async with pool.connection() as conn:
         await conn.execute(
             UPSERT_SESSION,
-            (sid, p.get("cwd"), None, "active" if tool_key == "ask_user" else "waiting"),
+            (sid, p.get("cwd"), None, "waiting"),
         )
         await conn.execute(
             "INSERT INTO events (session_id, kind, tool_name, payload) VALUES (%s, %s, %s, %s)",
             (sid, "PreToolUse", original_tool, Jsonb(p)),
         )
 
-    if tool_key == "ask_user":
-        return {}
     normalized = {"tool_name": tool_name, "tool_input": tool_input}
     return await _permission(
         request, normalized, sid, response=copilot_perm_response,
@@ -218,21 +228,23 @@ async def _permission(
     tin = p.get("tool_input") or {}
     verdict = classify(classification_tool or tool, tin)
     initial = {"allow": "allowed", "deny": "denied"}.get(verdict.action, "pending")
+    summary = question_summary(tin) if tool == "ask_user" else summarize(tool, tin)
     decided = initial != "pending"
     async with pool.connection() as conn:
         cur = await conn.execute(
             "INSERT INTO approvals (session_id, tool_name, tool_input, summary, risk, status, decided_by, reason, decided_at) "
             "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id",
-            (sid, tool, Jsonb(tin), summarize(tool, tin), verdict.risk, initial,
+            (sid, tool, Jsonb(tin), summary, verdict.risk, initial,
              "policy" if decided else None, verdict.reason,
              datetime.now(timezone.utc) if decided else None),
         )
         aid = (await cur.fetchone())["id"]
 
-    _schedule_task(
-        request.app,
-        _embed_approval(pool, aid, f"{tool}: {summarize(tool, tin)}"),
-    )
+    if tool != "ask_user":
+        _schedule_task(
+            request.app,
+            _embed_approval(pool, aid, f"{tool}: {summary}"),
+        )
 
     if initial == "allowed":
         await _set_active(pool, sid)
@@ -242,7 +254,7 @@ async def _permission(
         return response("deny", f"Blocked by policy: {verdict.reason}")
 
     loop = asyncio.get_running_loop()
-    deadline = loop.time() + WAIT_SECONDS
+    deadline = loop.time() + (QUESTION_SECONDS if tool == "ask_user" else WAIT_SECONDS)
     while True:
         async with pool.connection() as conn:
             cur = await conn.execute("SELECT status, reason FROM approvals WHERE id = %s", (aid,))
@@ -261,7 +273,11 @@ async def _permission(
 
     await _set_active(pool, sid)
     if row["status"] == "allowed":
+        if tool == "ask_user":
+            return response("deny", question_answer_reply(row["reason"]))
         return response("allow")
+    if tool == "ask_user":
+        return response("deny", question_declined_reply())
     return response("deny", row["reason"] or "Denied by user")
 
 
@@ -274,7 +290,10 @@ async def list_sessions(request: Request):
 
 @app.get("/approvals")
 async def list_approvals(request: Request, status: str = "pending", limit: int = Query(50, le=200)):
-    sql = "SELECT id, session_id, tool_name, summary, risk, status, decided_by, reason, created_at, decided_at FROM approvals"
+    if status == "pending":
+        sql = "SELECT id, session_id, tool_name, tool_input, summary, risk, status, decided_by, reason, created_at, decided_at FROM approvals"
+    else:
+        sql = "SELECT id, session_id, tool_name, summary, risk, status, decided_by, reason, created_at, decided_at FROM approvals"
     params: tuple = ()
     if status != "all":
         sql += " WHERE status = %s"
@@ -282,7 +301,11 @@ async def list_approvals(request: Request, status: str = "pending", limit: int =
     sql += " ORDER BY created_at DESC LIMIT %s"
     async with request.app.state.pool.connection() as conn:
         cur = await conn.execute(sql, params + (limit,))
-        return await cur.fetchall()
+        approvals = await cur.fetchall()
+    for approval in approvals:
+        if status == "pending" and approval["tool_name"] == "ask_user":
+            approval["question_fields"] = parse_question_fields(approval["tool_input"])
+    return approvals
 
 
 @app.get("/approvals/{aid}/similar")
@@ -318,15 +341,33 @@ class DecisionIn(BaseModel):
     reason: str | None = None
 
 
+class AnswerIn(BaseModel):
+    answer: dict[str, str | bool | int | float] = Field(min_length=1)
+
+
 @app.post("/approvals/{aid}/decide")
 async def decide(aid: int, body: DecisionIn, request: Request):
     status = "allowed" if body.decision == "allow" else "denied"
     async with request.app.state.pool.connection() as conn:
         cur = await conn.execute(
             "UPDATE approvals SET status = %s, decided_by = 'human', reason = %s, decided_at = now() "
-            "WHERE id = %s AND status = 'pending' RETURNING id",
-            (status, body.reason, aid),
+            "WHERE id = %s AND status = 'pending' "
+            "AND NOT (tool_name = 'ask_user' AND %s = 'allow') RETURNING id",
+            (status, body.reason, aid, body.decision),
         )
         if not await cur.fetchone():
             raise HTTPException(status_code=409, detail="approval is not pending")
     return {"id": aid, "status": status}
+
+
+@app.post("/approvals/{aid}/answer")
+async def answer_question(aid: int, body: AnswerIn, request: Request):
+    async with request.app.state.pool.connection() as conn:
+        cur = await conn.execute(
+            "UPDATE approvals SET status = 'allowed', decided_by = 'human', reason = %s, decided_at = now() "
+            "WHERE id = %s AND status = 'pending' AND tool_name = 'ask_user' RETURNING id",
+            (json.dumps(body.answer), aid),
+        )
+        if not await cur.fetchone():
+            raise HTTPException(status_code=409, detail="question is not pending")
+    return {"id": aid, "status": "allowed"}

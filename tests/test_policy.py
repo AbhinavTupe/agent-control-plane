@@ -1,6 +1,13 @@
 import pytest
 
-from server.policy import classify, summarize
+from server.policy import (
+    classify,
+    parse_question_fields,
+    question_answer_reply,
+    question_declined_reply,
+    question_summary,
+    summarize,
+)
 
 
 def bash(cmd):
@@ -227,3 +234,46 @@ def test_summarize():
     assert summarize("Bash", {"command": "ls -la"}) == "ls -la"
     assert summarize("Edit", {"file_path": "a.py"}) == "Edit a.py"
     assert len(summarize("Bash", {"command": "x" * 1000})) == 300
+
+
+def test_ask_user_always_requires_a_human():
+    for tool_input in ({}, {"message": "Continue?"}, {"requestedSchema": None}):
+        verdict = classify("ask_user", tool_input)
+        assert (verdict.action, verdict.risk) == ("ask", "low")
+
+
+def test_question_summary_uses_message_and_handles_invalid_args():
+    assert question_summary({"message": "Choose a plan"}) == "Choose a plan"
+    assert question_summary({"message": 42}) == ""
+    assert question_summary(None) == ""
+
+
+def test_question_answer_and_decline_reply_text():
+    assert question_answer_reply('{"plan":"fast"}') == (
+        "The user already answered this question via the control-plane dashboard. "
+        'Answer: {"plan":"fast"}. Do not ask again; continue using this answer.'
+    )
+    assert question_declined_reply() == "The user declined to answer."
+
+
+def test_parse_question_fields_handles_valid_missing_and_odd_schema():
+    args = {
+        "requestedSchema": {
+            "properties": {
+                "choice": {"type": "string", "title": "Pick one", "enum": ["A", "B"]},
+                "confirm": {"type": "boolean"},
+                "count": {"type": "integer", "enum": [1, 2]},
+                "odd": "invalid",
+                "bad_options": {"enum": ["ok", None, {"not": "an option"}]},
+            }
+        }
+    }
+    assert parse_question_fields(args) == [
+        {"name": "choice", "title": "Pick one", "type": "string", "enum": ["A", "B"]},
+        {"name": "confirm", "title": "confirm", "type": "boolean", "enum": []},
+        {"name": "count", "title": "count", "type": "integer", "enum": [1, 2]},
+        {"name": "odd", "title": "odd", "type": "string", "enum": []},
+        {"name": "bad_options", "title": "bad_options", "type": "string", "enum": ["ok"]},
+    ]
+    assert parse_question_fields({}) == []
+    assert parse_question_fields({"requestedSchema": {"properties": []}}) == []

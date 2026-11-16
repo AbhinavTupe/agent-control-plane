@@ -46,6 +46,16 @@
     .similar-item { display: flex; flex-wrap: wrap; align-items: center; gap: 7px; margin-top: 7px; font-size: .85rem; }
     .similar-summary { flex-basis: 100%; color: #c9d5ea; overflow-wrap: anywhere; }
     .actions { margin-top: 14px; justify-content: flex-start; }
+    .question-card { border-color: #7563a8; background: #1d1b2b; }
+    .question-label { color: #c8b8ff; }
+    .question-message { margin: 12px 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+    .question-field { margin-top: 12px; }
+    .question-field > label { display: block; margin-bottom: 6px; color: #c9d5ea; font-weight: 600; }
+    .question-options { display: flex; flex-wrap: wrap; gap: 8px; }
+    button.option { color: #e6eaf2; background: #35304b; }
+    button.option.selected { background: #7563a8; }
+    button.skip { color: #fff; background: #665c78; }
+    .question-field input[type="checkbox"] { min-width: 0; flex: none; width: 18px; height: 18px; accent-color: #a894e8; }
     button { border: 0; border-radius: 6px; padding: 7px 12px; cursor: pointer; color: #10141c; background: #7ce0b1; font: inherit; font-weight: 700; }
     button.deny { color: #fff; background: #bb5965; }
     button:disabled { opacity: .55; cursor: wait; }
@@ -152,25 +162,30 @@
       }
 
       for (const approval of items) {
+        const isQuestion = approval.tool_name === "ask_user";
         const card = document.createElement("article");
-        card.className = "card";
+        card.className = isQuestion ? "card question-card" : "card";
         const top = document.createElement("div");
         top.className = "card-top";
         const tool = document.createElement("span");
-        tool.className = "tool";
-        tool.textContent = text(approval.tool_name);
+        tool.className = isQuestion ? "tool question-label" : "tool";
+        tool.textContent = isQuestion ? "Question" : text(approval.tool_name);
         top.append(tool, badge(approval.risk));
         card.appendChild(top);
 
-        const summary = document.createElement("code");
-        summary.className = "summary";
-        summary.textContent = text(approval.summary);
-        card.appendChild(summary);
+        if (isQuestion) {
+          renderQuestion(approval, card);
+        } else {
+          const summary = document.createElement("code");
+          summary.className = "summary";
+          summary.textContent = text(approval.summary);
+          card.appendChild(summary);
 
-        const similar = document.createElement("div");
-        similar.className = "similar";
-        card.appendChild(similar);
-        showSimilar(approval.id, similar);
+          const similar = document.createElement("div");
+          similar.className = "similar";
+          card.appendChild(similar);
+          showSimilar(approval.id, similar);
+        }
 
         const meta = document.createElement("div");
         meta.className = "card-meta";
@@ -182,23 +197,143 @@
         meta.append(session, age);
         card.appendChild(meta);
 
-        const actions = document.createElement("div");
-        actions.className = "actions";
-        const reason = document.createElement("input");
-        reason.type = "text";
-        reason.placeholder = "Optional deny reason";
-        reason.setAttribute("aria-label", "Optional deny reason");
-        const approve = document.createElement("button");
-        approve.textContent = "Approve";
-        approve.addEventListener("click", () => decide(approval.id, "allow", "", actions));
-        const deny = document.createElement("button");
-        deny.className = "deny";
-        deny.textContent = "Deny";
-        deny.addEventListener("click", () => decide(approval.id, "deny", reason.value, actions));
-        actions.append(reason, approve, deny);
-        card.appendChild(actions);
+        if (!isQuestion) {
+          const actions = document.createElement("div");
+          actions.className = "actions";
+          const reason = document.createElement("input");
+          reason.type = "text";
+          reason.placeholder = "Optional deny reason";
+          reason.setAttribute("aria-label", "Optional deny reason");
+          const approve = document.createElement("button");
+          approve.textContent = "Approve";
+          approve.addEventListener("click", () => decide(approval.id, "allow", "", actions));
+          const deny = document.createElement("button");
+          deny.className = "deny";
+          deny.textContent = "Deny";
+          deny.addEventListener("click", () => decide(approval.id, "deny", reason.value, actions));
+          actions.append(reason, approve, deny);
+          card.appendChild(actions);
+        }
         pendingList.appendChild(card);
       }
+    }
+
+    function renderQuestion(approval, card) {
+      const message = document.createElement("p");
+      message.className = "question-message";
+      message.textContent = text(approval.summary);
+      card.appendChild(message);
+
+      const fields = Array.isArray(approval.question_fields)
+        ? approval.question_fields.map(field => ({
+          name: text(field.name),
+          title: text(field.title) || text(field.name),
+          type: ["string", "boolean", "integer", "number"].includes(field.type) ? field.type : "string",
+          options: Array.isArray(field.enum)
+            ? field.enum.filter(option => ["string", "boolean", "number"].includes(typeof option))
+            : []
+        }))
+        : [];
+      if (!fields.length) fields.push({ name: "answer", title: "Answer", type: "string", options: [] });
+
+      const controls = new Map();
+      for (const field of fields) {
+        const wrapper = document.createElement("div");
+        wrapper.className = "question-field";
+        const label = document.createElement("label");
+        label.textContent = field.title;
+        wrapper.appendChild(label);
+
+        if (field.options.length) {
+          const options = document.createElement("div");
+          options.className = "question-options";
+          const buttons = [];
+          for (const option of field.options) {
+            const button = document.createElement("button");
+            button.type = "button";
+            button.className = "option";
+            button.textContent = text(option);
+            button.addEventListener("click", () => {
+              controls.set(field.name, { value: option });
+              buttons.forEach(item => item.classList.toggle("selected", item === button));
+              if (fields.length === 1) {
+                void submitQuestion(approval.id, collectQuestionAnswer(fields, controls), card);
+              }
+            });
+            buttons.push(button);
+            options.appendChild(button);
+          }
+          wrapper.appendChild(options);
+        } else if (field.type === "boolean") {
+          const input = document.createElement("input");
+          input.type = "checkbox";
+          input.setAttribute("aria-label", field.title);
+          controls.set(field.name, { input, type: field.type });
+          wrapper.appendChild(input);
+        } else {
+          const input = document.createElement("input");
+          input.type = "text";
+          input.setAttribute("aria-label", field.title);
+          if (field.type === "number" || field.type === "integer") input.inputMode = "decimal";
+          controls.set(field.name, { input, type: field.type });
+          wrapper.appendChild(input);
+        }
+        card.appendChild(wrapper);
+      }
+
+      const actions = document.createElement("div");
+      actions.className = "actions";
+      const singleEnum = fields.length === 1 && fields[0].options.length > 0;
+      if (!singleEnum) {
+        const submit = document.createElement("button");
+        submit.textContent = "Submit";
+        submit.addEventListener("click", () => {
+          try {
+            const answer = collectQuestionAnswer(fields, controls);
+            if (!Object.keys(answer).length) throw new Error("Enter or select an answer first.");
+            void submitQuestion(approval.id, answer, card);
+          } catch (error) {
+            errorLine.textContent = text(error.message || error);
+          }
+        });
+        actions.appendChild(submit);
+      }
+      const skip = document.createElement("button");
+      skip.className = "skip";
+      skip.textContent = "Skip";
+      skip.addEventListener("click", () => decide(approval.id, "deny", "", card));
+      actions.appendChild(skip);
+      card.appendChild(actions);
+    }
+
+    function collectQuestionAnswer(fields, controls) {
+      const answer = {};
+      for (const field of fields) {
+        const control = controls.get(field.name);
+        if (!control) continue;
+        if (Object.prototype.hasOwnProperty.call(control, "value")) {
+          answer[field.name] = control.value;
+          continue;
+        }
+        if (field.type === "boolean") {
+          answer[field.name] = control.input.checked;
+          continue;
+        }
+        const value = control.input.value.trim();
+        if (!value) continue;
+        if (field.type === "integer") {
+          const number = Number(value);
+          if (!Number.isInteger(number)) throw new Error("Enter a whole number for " + field.title + ".");
+          answer[field.name] = number;
+        } else if (field.type === "number") {
+          const number = Number(value);
+          if (!Number.isFinite(number)) throw new Error("Enter a valid number for " + field.title + ".");
+          answer[field.name] = number;
+        } else {
+          answer[field.name] = value;
+        }
+      }
+      return answer;
     }
 
     function showSimilar(id, container) {
@@ -302,6 +437,23 @@
           body: JSON.stringify(body)
         });
         if (response.status !== 409 && !response.ok) throw new Error("Decision failed: " + response.status);
+        await refresh();
+      } catch (error) {
+        errorLine.textContent = text(error.message || error);
+        actions.querySelectorAll("button").forEach(button => { button.disabled = false; });
+      }
+    }
+
+    async function submitQuestion(id, answer, actions) {
+      actions.querySelectorAll("button").forEach(button => { button.disabled = true; });
+      errorLine.textContent = "";
+      try {
+        const response = await fetch("/approvals/" + encodeURIComponent(id) + "/answer", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ answer })
+        });
+        if (response.status !== 409 && !response.ok) throw new Error("Answer submission failed: " + response.status);
         await refresh();
       } catch (error) {
         errorLine.textContent = text(error.message || error);
