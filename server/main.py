@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Callable, Literal
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, PlainTextResponse
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool
@@ -39,6 +39,7 @@ TOKEN = os.getenv("ACP_TOKEN", "")
 WAIT_SECONDS = float(os.getenv("ACP_WAIT_SECONDS", "45"))  # keep below the hook timeout
 QUESTION_SECONDS = float(os.getenv("ACP_QUESTION_SECONDS", "50"))
 SIM_MIN = float(os.getenv("ACP_SIM_MIN", "0.80"))
+PORT = int(os.getenv("ACP_PORT", "8787"))
 POLL_SECONDS = 0.5  # Step 2 replaces polling with LISTEN/NOTIFY
 logger = logging.getLogger(__name__)
 
@@ -128,6 +129,26 @@ def require_token(x_acp_token: str = Header(default="")) -> None:
 
 
 app = FastAPI(title="agent-control-plane", lifespan=lifespan, dependencies=[Depends(require_token)])
+
+
+@app.middleware("http")
+async def validate_local_request(request: Request, call_next):
+    allowed_hosts = {f"127.0.0.1:{PORT}", f"localhost:{PORT}"}
+    host = request.headers.get("host", "").lower()
+    if host not in allowed_hosts:
+        if not (host == "testserver" and os.getenv("ACP_ALLOW_TESTCLIENT") == "1"):
+            return PlainTextResponse("Forbidden", status_code=403)
+
+    origin = request.headers.get("origin")
+    if request.method in {"POST", "PUT", "PATCH", "DELETE"} and origin is not None:
+        allowed_origins = {
+            f"http://127.0.0.1:{PORT}",
+            f"http://localhost:{PORT}",
+        }
+        if origin.lower() not in allowed_origins:
+            return PlainTextResponse("Forbidden", status_code=403)
+
+    return await call_next(request)
 
 
 @app.get("/", include_in_schema=False)
@@ -332,34 +353,42 @@ async def list_agents(request: Request):
                 WHERE a.status = 'pending'
                 GROUP BY a.session_id
             ),
-            activity AS (
-                SELECT e.session_id, e.tool_name AS last_tool,
-                       COALESCE(
-                           e.payload->>'summary',
-                           e.payload->'tool_input'->>'command',
-                           e.payload->'toolArgs'->>'command',
-                           e.kind
-                       ) AS last_summary,
-                       e.created_at
-                FROM events AS e
-                JOIN recent_sessions AS s ON s.id = e.session_id
-                UNION ALL
-                SELECT a.session_id, a.tool_name, a.summary, a.created_at
-                FROM approvals AS a
-                JOIN recent_sessions AS s ON s.id = a.session_id
-            ),
-            latest_activity AS (
-                SELECT DISTINCT ON (session_id)
-                       session_id, last_tool, last_summary
-                FROM activity
-                ORDER BY session_id, created_at DESC
-            )
             SELECT s.id, s.agent, s.cwd, s.last_seen_at,
                    COALESCE(p.pending_count, 0) AS pending_count,
                    a.last_tool, LEFT(a.last_summary, 120) AS last_summary
             FROM recent_sessions AS s
             LEFT JOIN pending AS p ON p.session_id = s.id
-            LEFT JOIN latest_activity AS a ON a.session_id = s.id
+            LEFT JOIN LATERAL (
+                SELECT activity.last_tool, activity.last_summary
+                FROM (
+                    (
+                        SELECT e.tool_name AS last_tool,
+                               COALESCE(
+                                   e.payload->>'summary',
+                                   e.payload->'tool_input'->>'command',
+                                   e.payload->'toolArgs'->>'command',
+                                   e.kind
+                               ) AS last_summary,
+                               e.created_at
+                        FROM events AS e
+                        WHERE e.session_id = s.id
+                        ORDER BY e.created_at DESC
+                        LIMIT 1
+                    )
+                    UNION ALL
+                    (
+                        SELECT approval.tool_name AS last_tool,
+                               approval.summary AS last_summary,
+                               approval.created_at
+                        FROM approvals AS approval
+                        WHERE approval.session_id = s.id
+                        ORDER BY approval.created_at DESC
+                        LIMIT 1
+                    )
+                ) AS activity
+                ORDER BY activity.created_at DESC
+                LIMIT 1
+            ) AS a ON TRUE
             ORDER BY s.last_seen_at DESC
             """,
             (24,),
