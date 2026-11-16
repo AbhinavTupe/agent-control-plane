@@ -38,7 +38,7 @@ First run downloads the ~130MB embedding model; the Postgres container listens o
 Install Python and Docker Desktop first. In PowerShell:
 
 ```powershell
-git clone <repository-url> agent-control-plane
+git clone https://github.com/AbhinavTupe/agent-control-plane.git
 cd agent-control-plane
 python -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt
