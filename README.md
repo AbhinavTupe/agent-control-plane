@@ -2,8 +2,6 @@
 
 One local inbox for GitHub Copilot tool approvals, with a policy engine that blocks risky actions and routes uncertain ones to a human.
 
-![dashboard](docs/img/dashboard.png)
-
 ## Why
 
 Coding agents can ask for permission repeatedly while working. Agent Control Plane collects those requests in one inbox and uses risk-aware auto-triage: clearly safe actions can proceed, known-dangerous actions are denied, and uncertain actions wait for a person.
@@ -35,6 +33,8 @@ The Copilot hook sends its `preToolUse` request to the local API. The policy eit
 
 ## Quickstart (Windows)
 
+First run downloads the ~130MB embedding model; the Postgres container listens on 127.0.0.1:5435.
+
 Install Python and Docker Desktop first. In PowerShell:
 
 ```powershell
@@ -48,6 +48,16 @@ docker compose up -d --wait
 ```
 
 Open <http://127.0.0.1:8787>.
+
+### Configuration
+
+| Variable | Default |
+|---|---|
+| `DATABASE_URL` | `postgresql://acp:acp@127.0.0.1:5435/acp` |
+| `ACP_PORT` | `8787` |
+| `ACP_WAIT_SECONDS` | `45` |
+| `ACP_SIM_MIN` | `0.80` |
+| `ACP_TOKEN` | Optional (unset by default) |
 
 ### Connect GitHub Copilot in VS Code
 
@@ -68,7 +78,7 @@ Open <http://127.0.0.1:8787>.
 | Auto-allow | `git status` proceeds and is recorded as decided by policy. |
 | Human approval | A pending command proceeds after approval in the dashboard. |
 | 45-second timeout | The hook returns `{}`; Copilot shows its own prompt and the approval expires. |
-| Retry and empty states | The dashboard implements retry for similar-decision lookups and empty states for approvals and sessions. |
+| Similar-decision cards | Precedents appear on a pending card (verified live, incl. retry while the embedding is computed). |
 | Automated tests | `pytest -q`: 137 passed. |
 
 ## Limitations
