@@ -39,6 +39,12 @@
     .risk-medium { background: #493919; color: #f3cb76; }
     .risk-high { background: #4a252b; color: #ff9a9f; }
     .risk-unknown { background: #303949; color: #c4cede; }
+    .decision-allowed { background: #163d32; color: #7ce0b1; }
+    .decision-denied { background: #4a252b; color: #ff9a9f; }
+    .similar.visible { margin-top: 14px; border-top: 1px solid var(--border); padding-top: 12px; }
+    .similar h3 { margin: 0 0 8px; font-size: .9rem; }
+    .similar-item { display: flex; flex-wrap: wrap; align-items: center; gap: 7px; margin-top: 7px; font-size: .85rem; }
+    .similar-summary { flex-basis: 100%; color: #c9d5ea; overflow-wrap: anywhere; }
     .actions { margin-top: 14px; justify-content: flex-start; }
     button { border: 0; border-radius: 6px; padding: 7px 12px; cursor: pointer; color: #10141c; background: #7ce0b1; font: inherit; font-weight: 700; }
     button.deny { color: #fff; background: #bb5965; }
@@ -102,6 +108,8 @@
     const recentList = document.getElementById("recent-list");
     const sessionsList = document.getElementById("sessions-list");
     const errorLine = document.getElementById("error");
+    const similarRequests = new Map();
+    let pendingApprovalIds = new Set();
     let polling = false;
     let refreshQueued = false;
 
@@ -133,6 +141,7 @@
 
     function renderPending(items) {
       document.getElementById("pending-count").textContent = String(items.length);
+      pendingApprovalIds = new Set(items.map(approval => String(approval.id)));
       pendingList.replaceChildren();
       if (!items.length) {
         const empty = document.createElement("p");
@@ -157,6 +166,11 @@
         summary.className = "summary";
         summary.textContent = text(approval.summary);
         card.appendChild(summary);
+
+        const similar = document.createElement("div");
+        similar.className = "similar";
+        card.appendChild(similar);
+        showSimilar(approval.id, similar);
 
         const meta = document.createElement("div");
         meta.className = "card-meta";
@@ -185,6 +199,53 @@
         card.appendChild(actions);
         pendingList.appendChild(card);
       }
+    }
+
+    function showSimilar(id, container) {
+      const key = String(id);
+      if (!similarRequests.has(key)) {
+        similarRequests.set(key, loadSimilar(key));
+      }
+      similarRequests.get(key).then(items => {
+        if (!container.isConnected || !pendingApprovalIds.has(key) || !items.length) return;
+        container.classList.add("visible");
+        const heading = document.createElement("h3");
+        heading.textContent = "Similar past decisions";
+        container.appendChild(heading);
+        for (const item of items.slice(0, 3)) {
+          const entry = document.createElement("div");
+          entry.className = "similar-item";
+          const status = document.createElement("span");
+          status.className = "badge decision-" + (item.status === "allowed" ? "allowed" : "denied");
+          status.textContent = text(item.status);
+          const similarity = Number(item.similarity);
+          const score = document.createElement("span");
+          score.textContent = Number.isFinite(similarity) ? (similarity * 100).toFixed(1) + "%" : "";
+          const decidedBy = document.createElement("span");
+          decidedBy.className = "muted";
+          decidedBy.textContent = "by " + text(item.decided_by);
+          const summary = document.createElement("span");
+          summary.className = "similar-summary";
+          summary.textContent = text(item.summary);
+          entry.append(status, score, decidedBy, summary);
+          container.appendChild(entry);
+        }
+      });
+    }
+
+    async function loadSimilar(key) {
+      for (let retry = 0; retry <= 3; retry++) {
+        if (!pendingApprovalIds.has(key)) return [];
+        let items = [];
+        try {
+          items = await getJson("/approvals/" + encodeURIComponent(key) + "/similar");
+        } catch {
+          items = [];
+        }
+        if (items.length || retry === 3 || !pendingApprovalIds.has(key)) return items;
+        await new Promise(resolve => window.setTimeout(resolve, 2000));
+      }
+      return [];
     }
 
     function renderRecent(items) {

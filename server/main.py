@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import hmac
+import logging
 import os
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
@@ -22,12 +23,15 @@ from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool
 from pydantic import BaseModel
 
+from .embed import embed, to_pgvector
 from .policy import classify, summarize
 
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://acp:acp@127.0.0.1:5435/acp")
 TOKEN = os.getenv("ACP_TOKEN", "")
 WAIT_SECONDS = float(os.getenv("ACP_WAIT_SECONDS", "45"))  # keep below the hook timeout
+SIM_MIN = float(os.getenv("ACP_SIM_MIN", "0.80"))
 POLL_SECONDS = 0.5  # Step 2 replaces polling with LISTEN/NOTIFY
+logger = logging.getLogger(__name__)
 
 UPSERT_SESSION = """
 INSERT INTO sessions (id, cwd, model, status) VALUES (%s, %s, %s, %s)
@@ -47,8 +51,43 @@ async def lifespan(app: FastAPI):
     )
     await pool.open(wait=True, timeout=10)
     app.state.pool = pool
+    app.state.embedding_tasks = set()
+    _schedule_task(app, _warm_embeddings())
     yield
+    if app.state.embedding_tasks:
+        await asyncio.gather(*app.state.embedding_tasks, return_exceptions=True)
     await pool.close()
+
+
+def _schedule_task(app: FastAPI, coroutine) -> None:
+    task = asyncio.create_task(coroutine)
+    app.state.embedding_tasks.add(task)
+    task.add_done_callback(app.state.embedding_tasks.discard)
+
+
+async def _warm_embeddings() -> None:
+    try:
+        await asyncio.to_thread(embed, "warmup")
+    except Exception as exc:
+        logger.warning(
+            "embedding model warmup failed: %s",
+            (str(exc).splitlines() or [type(exc).__name__])[0],
+        )
+
+
+async def _embed_approval(pool: AsyncConnectionPool, aid: int, text: str) -> None:
+    try:
+        vector = await asyncio.to_thread(embed, text)
+        async with pool.connection() as conn:
+            await conn.execute(
+                "UPDATE approvals SET embedding = %s::vector WHERE id = %s",
+                (to_pgvector(vector), aid),
+            )
+    except Exception as exc:
+        logger.warning(
+            "approval embedding failed: %s",
+            (str(exc).splitlines() or [type(exc).__name__])[0],
+        )
 
 
 def require_token(x_acp_token: str = Header(default="")) -> None:
@@ -190,6 +229,11 @@ async def _permission(
         )
         aid = (await cur.fetchone())["id"]
 
+    _schedule_task(
+        request.app,
+        _embed_approval(pool, aid, f"{tool}: {summarize(tool, tin)}"),
+    )
+
     if initial == "allowed":
         await _set_active(pool, sid)
         return response("allow")
@@ -238,6 +282,34 @@ async def list_approvals(request: Request, status: str = "pending", limit: int =
     sql += " ORDER BY created_at DESC LIMIT %s"
     async with request.app.state.pool.connection() as conn:
         cur = await conn.execute(sql, params + (limit,))
+        return await cur.fetchall()
+
+
+@app.get("/approvals/{aid}/similar")
+async def similar_approvals(
+    aid: int,
+    request: Request,
+    limit: int = Query(3, ge=1, le=3),
+):
+    async with request.app.state.pool.connection() as conn:
+        cur = await conn.execute(
+            """
+            WITH query AS (SELECT embedding FROM approvals WHERE id = %s)
+            SELECT a.id, a.summary, a.status, a.decided_by,
+                   1 - (a.embedding <=> query.embedding) AS similarity
+            FROM approvals AS a
+            CROSS JOIN query
+            WHERE query.embedding IS NOT NULL
+              AND a.embedding IS NOT NULL
+              AND a.status IN ('allowed', 'denied')
+              AND a.decided_by IN ('human', 'seed')
+              AND a.id <> %s
+              AND (a.embedding <=> query.embedding) <= %s
+            ORDER BY a.embedding <=> query.embedding
+            LIMIT %s
+            """,
+            (aid, aid, 1 - SIM_MIN, limit),
+        )
         return await cur.fetchall()
 
 
