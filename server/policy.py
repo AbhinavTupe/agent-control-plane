@@ -110,7 +110,7 @@ _HIGH_ASK = [
 _RM_RECURSIVE = re.compile(r"\brm\b[^\n;&|]*\s(-[a-zA-Z]*[rR][a-zA-Z]*|--recursive)\b")
 _RM_CATASTROPHIC = {"/", "/*", "~", "~/", "~/*", "$HOME", "$HOME/", "*", ".", "./", "..", "../"}
 
-_READ_ONLY = {"Read", "Glob", "Grep", "LS", "NotebookRead", "TodoWrite"}
+_READ_ONLY = {"Read", "Glob", "Grep", "LS", "NotebookRead"}
 _WRITE = {"Write", "Edit", "MultiEdit", "NotebookEdit"}
 _SENSITIVE_PATH = re.compile(
     r"(\.env\b|\.git[\\/]|id_rsa|\.ssh(?:[\\/]|$)|\.pem(?:$|[\\/])|credentials|secrets?)",
@@ -243,7 +243,14 @@ def classify(tool: str, tool_input: dict | None) -> Verdict:
         return classify_bash(str(tin.get("command", "")))
     path = _path(tin)
     if tool in _READ_ONLY:
-        if _SENSITIVE_PATH.search(path):
+        search_targets = [path]
+        if tool == "Grep":
+            for target in (tin.get("paths"), tin.get("pattern")):
+                if isinstance(target, (list, tuple)):
+                    search_targets.extend(str(item) for item in target)
+                elif target is not None:
+                    search_targets.append(str(target))
+        if any(_SENSITIVE_PATH.search(target) for target in search_targets):
             return Verdict("ask", "high", "reads a sensitive path")
         return Verdict("allow", "low", "read-only tool")
     if tool in _WRITE:

@@ -227,7 +227,23 @@ def test_non_bash_tools():
     assert classify("Read", {"file_path": r"C:\a\.git\config"}).action == "ask"
     assert classify("Edit", {"file_path": "src/app.py"}).risk == "medium"
     assert classify("Write", {"file_path": ".git/config"}).risk == "high"
+    assert classify("TodoWrite", {}).action == "ask"
     assert classify("mcp__x__do", {}).action == "ask"
+
+
+@pytest.mark.parametrize(
+    "tool_input",
+    [
+        {"paths": [r"C:\repo\.env"], "pattern": "KEY"},
+        {"paths": ["/repo"], "pattern": r"\.ssh/id_rsa"},
+        {"paths": [r"C:\repo"], "pattern": r"\.pem"},
+        {"paths": ["/repo"], "pattern": "credentials"},
+        {"paths": [r"C:\repo"], "pattern": "secrets"},
+    ],
+)
+def test_read_only_search_of_sensitive_targets_asks(tool_input):
+    verdict = classify("Grep", tool_input)
+    assert (verdict.action, verdict.risk) == ("ask", "high")
 
 
 def test_summarize():

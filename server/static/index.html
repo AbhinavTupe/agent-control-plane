@@ -31,6 +31,17 @@
     .card, .table-wrap { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; }
     .card { padding: 16px; min-width: 0; }
     .card-top, .card-meta, .actions { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+    .agent-heading { display: flex; align-items: center; gap: 8px; min-width: 0; }
+    .agent-badge { border-radius: 999px; padding: 2px 9px; color: #b8d1ff; background: #263750; font-size: .78rem; font-weight: 700; }
+    .agent-folder { overflow-wrap: anywhere; font-weight: 650; }
+    .agent-state { display: inline-flex; align-items: center; gap: 7px; color: var(--muted); font-size: .85rem; text-transform: capitalize; }
+    .agent-state-dot { width: 9px; height: 9px; flex: none; border-radius: 50%; background: #778196; }
+    .state-waiting .agent-state-dot { background: #f3cb76; box-shadow: 0 0 9px #f3cb7666; }
+    .state-active .agent-state-dot { background: #55d68b; box-shadow: 0 0 9px #55d68b66; }
+    .state-idle .agent-state-dot { background: #778196; }
+    .state-inactive { opacity: .58; }
+    .agent-activity { display: block; min-height: 1.5em; overflow-wrap: anywhere; }
+    .agent-meta { justify-content: space-between; }
     .summary { display: block; white-space: pre-wrap; overflow-wrap: anywhere; font: 13px/1.5 ui-monospace, SFMono-Regular, Consolas, monospace; margin: 12px 0; }
     .card-meta { justify-content: flex-start; flex-wrap: wrap; color: var(--muted); font-size: .87rem; }
     .tool { color: #c9d5ea; font-weight: 600; }
@@ -82,7 +93,7 @@
       <div>
         <div class="status-line">
           <span class="status-indicator"><span id="health-dot" class="dot"></span><span id="health">Checking server…</span></span>
-          <span class="counts"><span><span id="pending-count" class="count">0</span> pending</span><span><span id="session-count" class="count">0</span> sessions</span></span>
+          <span class="counts"><span><span id="pending-count" class="count">0</span> pending</span><span><span id="agents-count" class="count">0</span> agents</span></span>
         </div>
         <div id="error" role="status" aria-live="polite"></div>
       </div>
@@ -103,25 +114,22 @@
       </div>
     </section>
 
-    <section aria-labelledby="sessions-heading">
-      <h2 id="sessions-heading">Sessions</h2>
-      <div class="table-wrap">
-        <table>
-          <thead><tr><th>ID</th><th>Working directory</th><th>Status</th><th>Last seen</th></tr></thead>
-          <tbody id="sessions-list"><tr><td class="empty" colspan="4">Loading sessions…</td></tr></tbody>
-        </table>
-      </div>
+    <section aria-labelledby="agents-heading">
+      <h2 id="agents-heading">Agents</h2>
+      <div id="agents-list" class="cards"><p class="empty">Loading agents…</p></div>
     </section>
   </main>
   <script>
     const pendingList = document.getElementById("pending-list");
     const recentList = document.getElementById("recent-list");
-    const sessionsList = document.getElementById("sessions-list");
+    const agentsList = document.getElementById("agents-list");
     const errorLine = document.getElementById("error");
     const similarRequests = new Map();
     let pendingApprovalIds = new Set();
     let polling = false;
     let refreshQueued = false;
+    let lastAgentsFetchAt = 0;
+    let cachedAgents = null;
 
     function text(value) {
       return value == null ? "" : String(value);
@@ -151,6 +159,7 @@
 
     function renderPending(items) {
       document.getElementById("pending-count").textContent = String(items.length);
+      document.title = (items.length ? "(" + items.length + ") " : "") + "Agent Control Plane";
       pendingApprovalIds = new Set(items.map(approval => String(approval.id)));
       pendingList.replaceChildren();
       if (!items.length) {
@@ -190,7 +199,7 @@
         const meta = document.createElement("div");
         meta.className = "card-meta";
         const session = document.createElement("span");
-        session.textContent = "Session " + text(approval.session_id).slice(0, 8);
+        session.textContent = (text(approval.folder) || "unknown") + " · " + text(approval.session_id).slice(0, 8);
         const created = new Date(approval.created_at).getTime();
         const age = document.createElement("span");
         age.textContent = Number.isNaN(created) ? "Age unavailable" : Math.max(0, Math.floor((Date.now() - created) / 1000)) + "s ago";
@@ -347,22 +356,35 @@
         const heading = document.createElement("h3");
         heading.textContent = "Similar past decisions";
         container.appendChild(heading);
-        for (const item of items.slice(0, 3)) {
+        const grouped = new Map();
+        for (const item of items) {
+          const groupKey = JSON.stringify([text(item.summary), text(item.status)]);
+          const existing = grouped.get(groupKey);
+          if (!existing) {
+            grouped.set(groupKey, { item, count: 1 });
+          } else {
+            existing.count++;
+            const currentSimilarity = Number(existing.item.similarity);
+            const nextSimilarity = Number(item.similarity);
+            if (Number.isFinite(nextSimilarity) && (!Number.isFinite(currentSimilarity) || nextSimilarity > currentSimilarity)) {
+              existing.item = item;
+            }
+          }
+        }
+        for (const { item, count } of grouped.values()) {
           const entry = document.createElement("div");
           entry.className = "similar-item";
-          const status = document.createElement("span");
-          status.className = "badge decision-" + (item.status === "allowed" ? "allowed" : "denied");
-          status.textContent = text(item.status);
           const similarity = Number(item.similarity);
-          const score = document.createElement("span");
-          score.textContent = Number.isFinite(similarity) ? (similarity * 100).toFixed(1) + "%" : "";
-          const decidedBy = document.createElement("span");
-          decidedBy.className = "muted";
-          decidedBy.textContent = "by " + text(item.decided_by);
+          const decision = document.createElement("span");
+          decision.className = "badge decision-" + (item.status === "allowed" ? "allowed" : "denied");
+          decision.textContent = text(item.status).toUpperCase()
+            + (Number.isFinite(similarity) ? " " + (similarity * 100).toFixed(0) + "%" : "")
+            + " by " + text(item.decided_by)
+            + (count > 1 ? " ×" + count : "");
           const summary = document.createElement("span");
           summary.className = "similar-summary";
           summary.textContent = text(item.summary);
-          entry.append(status, score, decidedBy, summary);
+          entry.append(decision, summary);
           container.appendChild(entry);
         }
       });
@@ -402,20 +424,58 @@
       }
     }
 
-    function renderSessions(items) {
-      document.getElementById("session-count").textContent = String(items.length);
-      sessionsList.replaceChildren();
+    function renderAgents(items) {
+      document.getElementById("agents-count").textContent = String(items.length);
+      agentsList.replaceChildren();
       if (!items.length) {
-        const row = sessionsList.insertRow();
-        cell(row, "No sessions", "empty").colSpan = 4;
+        const empty = document.createElement("p");
+        empty.className = "empty";
+        empty.textContent = "No agents seen in the last 24 hours";
+        agentsList.appendChild(empty);
         return;
       }
       for (const item of items) {
-        const row = sessionsList.insertRow();
-        cell(row, text(item.id).slice(0, 8));
-        cell(row, item.cwd);
-        cell(row, item.status);
-        cell(row, formatTime(item.last_seen_at));
+        const state = ["waiting", "active", "idle", "inactive"].includes(item.state) ? item.state : "inactive";
+        const card = document.createElement("article");
+        card.className = "card state-" + state;
+        const top = document.createElement("div");
+        top.className = "card-top";
+        const heading = document.createElement("div");
+        heading.className = "agent-heading";
+        const agent = document.createElement("span");
+        agent.className = "agent-badge";
+        agent.textContent = text(item.agent) || "unknown";
+        const folder = document.createElement("span");
+        folder.className = "agent-folder";
+        folder.textContent = text(item.folder) || "unknown";
+        heading.append(agent, folder);
+        const stateLabel = document.createElement("span");
+        stateLabel.className = "agent-state";
+        const dot = document.createElement("span");
+        dot.className = "agent-state-dot";
+        const stateText = document.createElement("span");
+        stateText.textContent = state;
+        stateLabel.append(dot, stateText);
+        top.append(heading, stateLabel);
+
+        const activity = document.createElement("code");
+        activity.className = "summary agent-activity";
+        activity.textContent = [text(item.last_tool), text(item.last_summary)].filter(Boolean).join(": ") || "No recent tool activity";
+
+        const meta = document.createElement("div");
+        meta.className = "card-meta agent-meta";
+        const identity = document.createElement("span");
+        identity.textContent = text(item.id).slice(0, 8);
+        const seen = document.createElement("span");
+        const seenAt = new Date(item.last_seen_at).getTime();
+        seen.textContent = Number.isNaN(seenAt)
+          ? "Seen time unavailable"
+          : "Seen " + Math.max(0, Math.floor((Date.now() - seenAt) / 1000)) + "s ago";
+        const pending = document.createElement("span");
+        pending.textContent = String(item.pending_count) + " pending";
+        meta.append(identity, seen, pending);
+        card.append(top, activity, meta);
+        agentsList.appendChild(card);
       }
     }
 
@@ -473,7 +533,12 @@
           fetch("/healthz"),
           getJson("/approvals?status=pending"),
           getJson("/approvals?status=all&limit=20"),
-          getJson("/sessions")
+          Date.now() - lastAgentsFetchAt >= 3000
+            ? (lastAgentsFetchAt = Date.now(), getJson("/agents").then(items => {
+              cachedAgents = items;
+              return items;
+            }))
+            : Promise.resolve(cachedAgents)
         ]);
         const healthResponse = results[0];
         const healthy = healthResponse.status === "fulfilled" && healthResponse.value.ok;
@@ -482,7 +547,7 @@
 
         if (results[1].status === "fulfilled") renderPending(results[1].value);
         if (results[2].status === "fulfilled") renderRecent(results[2].value);
-        if (results[3].status === "fulfilled") renderSessions(results[3].value);
+        if (results[3].status === "fulfilled" && results[3].value) renderAgents(results[3].value);
 
         const failures = results.slice(1).filter(result => result.status === "rejected");
         errorLine.textContent = failures.length ? "Some dashboard data could not be refreshed." : "";
@@ -498,7 +563,7 @@
     }
 
     refresh();
-    window.setInterval(refresh, 1000);
+    window.setInterval(refresh, 3000);
   </script>
 </body>
 </html>

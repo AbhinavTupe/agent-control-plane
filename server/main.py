@@ -43,13 +43,36 @@ POLL_SECONDS = 0.5  # Step 2 replaces polling with LISTEN/NOTIFY
 logger = logging.getLogger(__name__)
 
 UPSERT_SESSION = """
-INSERT INTO sessions (id, cwd, model, status) VALUES (%s, %s, %s, %s)
+INSERT INTO sessions (id, agent, cwd, model, status) VALUES (%s, %s, %s, %s, %s)
 ON CONFLICT (id) DO UPDATE SET
+  agent = EXCLUDED.agent,
   cwd = COALESCE(EXCLUDED.cwd, sessions.cwd),
   model = COALESCE(EXCLUDED.model, sessions.model),
   status = EXCLUDED.status,
   last_seen_at = now()
 """
+
+
+def folder_name(cwd: str | None) -> str:
+    if not cwd:
+        return "unknown"
+    folder = cwd.rstrip("/\\").replace("\\", "/").rsplit("/", 1)[-1]
+    return folder or "unknown"
+
+
+def compute_agent_state(
+    pending_count: int,
+    last_seen_at: datetime,
+    now: datetime | None = None,
+) -> str:
+    if pending_count > 0:
+        return "waiting"
+    elapsed = (now or datetime.now(timezone.utc)) - last_seen_at
+    if elapsed.total_seconds() < 60:
+        return "active"
+    if elapsed.total_seconds() < 15 * 60:
+        return "idle"
+    return "inactive"
 
 
 @asynccontextmanager
@@ -134,7 +157,7 @@ async def hook(request: Request):
     kind = p.get("hook_event_name") or "unknown"
     status = {"Stop": "idle", "SessionEnd": "ended", "PermissionRequest": "waiting"}.get(kind, "active")
     async with pool.connection() as conn:
-        await conn.execute(UPSERT_SESSION, (sid, p.get("cwd"), p.get("model"), status))
+        await conn.execute(UPSERT_SESSION, (sid, "claude-code", p.get("cwd"), p.get("model"), status))
         await conn.execute(
             "INSERT INTO events (session_id, kind, tool_name, payload) VALUES (%s, %s, %s, %s)",
             (sid, kind, p.get("tool_name"), Jsonb(p)),
@@ -157,6 +180,9 @@ async def copilot_hook(request: Request):
     elif tool_key == "view":
         tool_name = "Read"
         classification_tool = "Read"
+    elif tool_key == "rg":
+        tool_name = "Grep"
+        classification_tool = "Grep"
     elif tool_key in {"apply_patch", "edit", "create"}:
         tool_name = "Write"
         classification_tool = "Write"
@@ -175,7 +201,7 @@ async def copilot_hook(request: Request):
     async with pool.connection() as conn:
         await conn.execute(
             UPSERT_SESSION,
-            (sid, p.get("cwd"), None, "waiting"),
+            (sid, "copilot", p.get("cwd"), None, "waiting"),
         )
         await conn.execute(
             "INSERT INTO events (session_id, kind, tool_name, payload) VALUES (%s, %s, %s, %s)",
@@ -288,21 +314,87 @@ async def list_sessions(request: Request):
         return await cur.fetchall()
 
 
+@app.get("/agents")
+async def list_agents(request: Request):
+    async with request.app.state.pool.connection() as conn:
+        cur = await conn.execute(
+            """
+            WITH recent_sessions AS (
+                SELECT id, agent, cwd, last_seen_at
+                FROM sessions
+                WHERE id <> 'seed'
+                  AND last_seen_at >= now() - (%s * interval '1 hour')
+            ),
+            pending AS (
+                SELECT a.session_id, count(*) AS pending_count
+                FROM approvals AS a
+                JOIN recent_sessions AS s ON s.id = a.session_id
+                WHERE a.status = 'pending'
+                GROUP BY a.session_id
+            ),
+            activity AS (
+                SELECT e.session_id, e.tool_name AS last_tool,
+                       COALESCE(
+                           e.payload->>'summary',
+                           e.payload->'tool_input'->>'command',
+                           e.payload->'toolArgs'->>'command',
+                           e.kind
+                       ) AS last_summary,
+                       e.created_at
+                FROM events AS e
+                JOIN recent_sessions AS s ON s.id = e.session_id
+                UNION ALL
+                SELECT a.session_id, a.tool_name, a.summary, a.created_at
+                FROM approvals AS a
+                JOIN recent_sessions AS s ON s.id = a.session_id
+            ),
+            latest_activity AS (
+                SELECT DISTINCT ON (session_id)
+                       session_id, last_tool, last_summary
+                FROM activity
+                ORDER BY session_id, created_at DESC
+            )
+            SELECT s.id, s.agent, s.cwd, s.last_seen_at,
+                   COALESCE(p.pending_count, 0) AS pending_count,
+                   a.last_tool, LEFT(a.last_summary, 120) AS last_summary
+            FROM recent_sessions AS s
+            LEFT JOIN pending AS p ON p.session_id = s.id
+            LEFT JOIN latest_activity AS a ON a.session_id = s.id
+            ORDER BY s.last_seen_at DESC
+            """,
+            (24,),
+        )
+        agents = await cur.fetchall()
+    for agent in agents:
+        agent["folder"] = folder_name(agent["cwd"])
+        agent["state"] = compute_agent_state(agent["pending_count"], agent["last_seen_at"])
+    return agents
+
+
 @app.get("/approvals")
 async def list_approvals(request: Request, status: str = "pending", limit: int = Query(50, le=200)):
     if status == "pending":
-        sql = "SELECT id, session_id, tool_name, tool_input, summary, risk, status, decided_by, reason, created_at, decided_at FROM approvals"
+        sql = (
+            "SELECT a.id, a.session_id, a.tool_name, a.tool_input, a.summary, a.risk, a.status, "
+            "a.decided_by, a.reason, a.created_at, a.decided_at, s.cwd "
+            "FROM approvals AS a LEFT JOIN sessions AS s ON s.id = a.session_id"
+        )
     else:
-        sql = "SELECT id, session_id, tool_name, summary, risk, status, decided_by, reason, created_at, decided_at FROM approvals"
+        sql = (
+            "SELECT a.id, a.session_id, a.tool_name, a.summary, a.risk, a.status, "
+            "a.decided_by, a.reason, a.created_at, a.decided_at, s.cwd "
+            "FROM approvals AS a LEFT JOIN sessions AS s ON s.id = a.session_id"
+        )
     params: tuple = ()
     if status != "all":
-        sql += " WHERE status = %s"
+        sql += " WHERE a.status = %s"
         params = (status,)
-    sql += " ORDER BY created_at DESC LIMIT %s"
+    sql += " ORDER BY a.created_at DESC LIMIT %s"
     async with request.app.state.pool.connection() as conn:
         cur = await conn.execute(sql, params + (limit,))
         approvals = await cur.fetchall()
     for approval in approvals:
+        approval["folder"] = folder_name(approval["cwd"])
         if status == "pending" and approval["tool_name"] == "ask_user":
             approval["question_fields"] = parse_question_fields(approval["tool_input"])
     return approvals
