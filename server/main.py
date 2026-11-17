@@ -18,13 +18,14 @@ from pathlib import Path
 from typing import Callable, Literal
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
-from fastapi.responses import FileResponse, PlainTextResponse
+from fastapi.responses import FileResponse, PlainTextResponse, StreamingResponse
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool
 from pydantic import BaseModel, Field
 
 from .embed import embed, to_pgvector
+from .events import EventBroadcaster, listen_for_events, notify_changed
 from .policy import (
     classify,
     question_answer_reply,
@@ -40,7 +41,7 @@ WAIT_SECONDS = float(os.getenv("ACP_WAIT_SECONDS", "45"))  # keep below the hook
 QUESTION_SECONDS = float(os.getenv("ACP_QUESTION_SECONDS", "50"))
 SIM_MIN = float(os.getenv("ACP_SIM_MIN", "0.80"))
 PORT = int(os.getenv("ACP_PORT", "8787"))
-POLL_SECONDS = 0.5  # Step 2 replaces polling with LISTEN/NOTIFY
+POLL_SECONDS = 0.5
 logger = logging.getLogger(__name__)
 
 UPSERT_SESSION = """
@@ -84,18 +85,28 @@ async def lifespan(app: FastAPI):
     )
     await pool.open(wait=True, timeout=10)
     app.state.pool = pool
-    app.state.embedding_tasks = set()
+    app.state.background_tasks = set()
+    app.state.event_broadcaster = EventBroadcaster()
+    app.state.event_listener_task = asyncio.create_task(
+        listen_for_events(DATABASE_URL, app.state.event_broadcaster)
+    )
     _schedule_task(app, _warm_embeddings())
     yield
-    if app.state.embedding_tasks:
-        await asyncio.gather(*app.state.embedding_tasks, return_exceptions=True)
+    app.state.event_listener_task.cancel()
+    await asyncio.gather(app.state.event_listener_task, return_exceptions=True)
+    if app.state.background_tasks:
+        await asyncio.gather(*app.state.background_tasks, return_exceptions=True)
     await pool.close()
 
 
 def _schedule_task(app: FastAPI, coroutine) -> None:
     task = asyncio.create_task(coroutine)
-    app.state.embedding_tasks.add(task)
-    task.add_done_callback(app.state.embedding_tasks.discard)
+    app.state.background_tasks.add(task)
+    task.add_done_callback(app.state.background_tasks.discard)
+
+
+def _schedule_notification(app: FastAPI) -> None:
+    _schedule_task(app, notify_changed(app.state.pool))
 
 
 async def _warm_embeddings() -> None:
@@ -116,6 +127,7 @@ async def _embed_approval(pool: AsyncConnectionPool, aid: int, text: str) -> Non
                 "UPDATE approvals SET embedding = %s::vector WHERE id = %s",
                 (to_pgvector(vector), aid),
             )
+        await notify_changed(pool)
     except Exception as exc:
         logger.warning(
             "approval embedding failed: %s",
@@ -156,6 +168,28 @@ async def dashboard():
     return FileResponse(Path(__file__).parent / "static" / "index.html")
 
 
+@app.get("/events")
+async def dashboard_events(request: Request):
+    async def stream():
+        queue = request.app.state.event_broadcaster.subscribe()
+        try:
+            while True:
+                try:
+                    await asyncio.wait_for(queue.get(), timeout=15)
+                except asyncio.TimeoutError:
+                    yield ": ping\n\n"
+                else:
+                    yield "data: changed\n\n"
+        finally:
+            request.app.state.event_broadcaster.unsubscribe(queue)
+
+    return StreamingResponse(
+        stream(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
 def perm_response(behavior: str, message: str | None = None) -> dict:
     decision: dict = {"behavior": behavior}
     if behavior == "deny" and message:
@@ -183,6 +217,7 @@ async def hook(request: Request):
             "INSERT INTO events (session_id, kind, tool_name, payload) VALUES (%s, %s, %s, %s)",
             (sid, kind, p.get("tool_name"), Jsonb(p)),
         )
+    _schedule_notification(request.app)
     if kind != "PermissionRequest":
         return {}
     return await _permission(request, p, sid)
@@ -229,6 +264,7 @@ async def copilot_hook(request: Request):
             (sid, "PreToolUse", original_tool, Jsonb(p)),
         )
 
+    _schedule_notification(request.app)
     normalized = {"tool_name": tool_name, "tool_input": tool_input}
     return await _permission(
         request, normalized, sid, response=copilot_perm_response,
@@ -245,22 +281,27 @@ def copilot_perm_response(behavior: str, message: str | None = None) -> dict:
     return response
 
 
-async def _set_active(pool, sid: str) -> None:
-    async with pool.connection() as conn:
-        await conn.execute(
+async def _set_active(app, sid: str) -> None:
+    async with app.state.pool.connection() as conn:
+        cur = await conn.execute(
             "UPDATE sessions SET status = 'active', last_seen_at = now() WHERE id = %s AND status = 'waiting'",
             (sid,),
         )
+        if cur.rowcount:
+            _schedule_notification(app)
 
 
-async def _expire(pool, aid: int, who: str) -> bool:
-    async with pool.connection() as conn:
+async def _expire(app, aid: int, who: str) -> bool:
+    async with app.state.pool.connection() as conn:
         cur = await conn.execute(
             "UPDATE approvals SET status = 'expired', decided_by = %s, decided_at = now() "
             "WHERE id = %s AND status = 'pending'",
             (who, aid),
         )
-        return cur.rowcount == 1
+        expired = cur.rowcount == 1
+    if expired:
+        _schedule_notification(app)
+    return expired
 
 
 async def _permission(
@@ -286,6 +327,7 @@ async def _permission(
              datetime.now(timezone.utc) if decided else None),
         )
         aid = (await cur.fetchone())["id"]
+    _schedule_notification(request.app)
 
     if tool != "ask_user":
         _schedule_task(
@@ -294,10 +336,10 @@ async def _permission(
         )
 
     if initial == "allowed":
-        await _set_active(pool, sid)
+        await _set_active(request.app, sid)
         return response("allow")
     if initial == "denied":
-        await _set_active(pool, sid)
+        await _set_active(request.app, sid)
         return response("deny", f"Blocked by policy: {verdict.reason}")
 
     loop = asyncio.get_running_loop()
@@ -309,16 +351,16 @@ async def _permission(
         if row["status"] != "pending":
             break
         if loop.time() >= deadline:
-            if await _expire(pool, aid, "timeout"):
-                await _set_active(pool, sid)
+            if await _expire(request.app, aid, "timeout"):
+                await _set_active(request.app, sid)
                 return {}
             continue  # a human decided at the last moment; re-read
         if await request.is_disconnected():
-            await _expire(pool, aid, "client_gone")
+            await _expire(request.app, aid, "client_gone")
             return {}
         await asyncio.sleep(POLL_SECONDS)
 
-    await _set_active(pool, sid)
+    await _set_active(request.app, sid)
     if row["status"] == "allowed":
         if tool == "ask_user":
             return response("deny", question_answer_reply(row["reason"]))
@@ -478,6 +520,7 @@ async def decide(aid: int, body: DecisionIn, request: Request):
         )
         if not await cur.fetchone():
             raise HTTPException(status_code=409, detail="approval is not pending")
+    _schedule_notification(request.app)
     return {"id": aid, "status": status}
 
 
@@ -491,4 +534,5 @@ async def answer_question(aid: int, body: AnswerIn, request: Request):
         )
         if not await cur.fetchone():
             raise HTTPException(status_code=409, detail="question is not pending")
+    _schedule_notification(request.app)
     return {"id": aid, "status": "allowed"}

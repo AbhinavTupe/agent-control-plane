@@ -128,8 +128,12 @@
     let pendingApprovalIds = new Set();
     let polling = false;
     let refreshQueued = false;
+    let agentsRefreshQueued = false;
     let lastAgentsFetchAt = 0;
     let cachedAgents = null;
+    let refreshDebounce;
+    let eventStreamConnected = false;
+    let pollTimer;
 
     function text(value) {
       return value == null ? "" : String(value);
@@ -521,9 +525,10 @@
       }
     }
 
-    async function refresh() {
+    async function refresh(forceAgents = false) {
       if (polling) {
         refreshQueued = true;
+        agentsRefreshQueued = agentsRefreshQueued || forceAgents;
         return;
       }
       polling = true;
@@ -533,7 +538,7 @@
           fetch("/healthz"),
           getJson("/approvals?status=pending"),
           getJson("/approvals?status=all&limit=20"),
-          Date.now() - lastAgentsFetchAt >= 3000
+          forceAgents || Date.now() - lastAgentsFetchAt >= 3000
             ? (lastAgentsFetchAt = Date.now(), getJson("/agents").then(items => {
               cachedAgents = items;
               return items;
@@ -556,14 +561,35 @@
       } finally {
         polling = false;
         if (refreshQueued) {
+          const forceAgents = agentsRefreshQueued;
           refreshQueued = false;
-          void refresh();
+          agentsRefreshQueued = false;
+          void refresh(forceAgents);
         }
       }
     }
 
+    function updatePollingInterval() {
+      if (pollTimer) window.clearInterval(pollTimer);
+      pollTimer = window.setInterval(refresh, eventStreamConnected ? 15000 : 3000);
+    }
+
+    const events = new EventSource("/events");
+    events.onopen = () => {
+      eventStreamConnected = true;
+      updatePollingInterval();
+    };
+    events.addEventListener("changed", () => {
+      window.clearTimeout(refreshDebounce);
+      refreshDebounce = window.setTimeout(() => void refresh(true), 200);
+    });
+    events.onerror = () => {
+      eventStreamConnected = false;
+      updatePollingInterval();
+    };
+
     refresh();
-    window.setInterval(refresh, 3000);
+    updatePollingInterval();
   </script>
 </body>
 </html>

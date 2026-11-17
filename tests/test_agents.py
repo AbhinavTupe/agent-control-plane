@@ -71,6 +71,7 @@ def test_copilot_hook_maps_read_only_tools(
         return {}
 
     monkeypatch.setattr("server.main._permission", allow_permission)
+    monkeypatch.setattr("server.main._schedule_notification", lambda _app: None)
 
     asyncio.run(
         copilot_hook(
