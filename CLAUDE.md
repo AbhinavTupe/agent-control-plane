@@ -17,6 +17,16 @@ Timeout (45s) or client disconnect → server returns `{}` → Claude Code shows
 - Parameterized SQL only. No string-formatted queries.
 - `server/policy.py` stays pure (no I/O) and fully unit-tested. Every new rule needs a test.
 - No new dependencies without asking. Small diffs. Run `pytest -q` before saying done.
+- Repository rules are a convenience layer, not a security boundary.
+
+## What's new in v2
+- Push updates with Postgres LISTEN/NOTIFY and SSE, polling fallback, and fast graceful shutdown.
+- Restrictive `.acp-policy.yml` rules (`deny_contains` / `ask_contains`) use substring matching only, can never loosen built-ins, and invalid files are ignored.
+- One-command hook setup: `python -m scripts.install_hook`; validate with `python -m scripts.install_hook --check`.
+- Batch approve or deny identical pending requests (same command and repo), never `ask_user` requests.
+- Similar-decision hints show real human decisions first; synthetic seeds are badged "example".
+- Evaluation: 112 cases and 0 unsafe auto-allows. This is a regression suite, not an independent benchmark.
+- Automated tests: 268 passing.
 
 ## Commands
 ```
@@ -38,6 +48,8 @@ python -m pytest -q               # policy tests
 - Host port is 5435 because 5432 conflicts on dev machines.
 
 ## Copilot hook — live verification
+- Verified live with Copilot in VS Code on 2026-11-17: SSE push; shutdown with an open SSE connection; repository deny and ask rules; installer-generated hook configuration; batch deny of two identical pending approvals.
+- Similar-decision real-first ordering is integration-tested only, not visually verified live.
 - `preToolUse` payload fields are camelCase: `cwd`, `sessionId`, `toolName`, `toolArgs`, `timestamp`, and `toolCallId`. There is no model field.
 - `ask_user` fires the hook with `toolArgs` containing the question `message` and `requestedSchema` enum. The dashboard shows a Question card. The chosen answer is returned by denying the tool call with reason `The user already answered ... Answer: {json}`; Copilot replied "You chose: blue" without its own question box.
 - If no answer arrives within 50 seconds (`ACP_QUESTION_SECONDS`), the hook returns `{}` and Copilot shows its own question box.
@@ -52,13 +64,19 @@ python -m pytest -q               # policy tests
 - The hook loads only if the VS Code workspace root is the folder that directly contains `.github`.
 - Server down: the hook prints `{}` and Copilot falls back to its own approval prompt; no hang, no auto-allow (verified live 2026-11-17).
 
-## Known limitation
-`PermissionRequest` only fires when Claude Code would have prompted anyway. To enforce blocks on commands the user's settings already allow, add a `PreToolUse` hook (Step 3).
+## Demo
+1. Auto-allow `Get-Date`.
+2. Deny `Stop-Computer`.
+3. Escalate an uncertain command to a human and decide it in the inbox.
+4. Answer an agent's `ask_user` question from its Question card.
+5. Run two agents at once and see both waiting in the Agents panel.
+
+## Limitations
+- Only GitHub Copilot in VS Code has been verified; testing has been on Windows only. Claude Code adapter, other agents, and Mac/Linux remain unverified.
+- Repository rules are a convenience layer, not a security boundary.
+- `PermissionRequest` only fires when Claude Code would have prompted anyway. To enforce blocks on commands the user's settings already allow, add a `PreToolUse` hook (Step 3).
 
 ## Roadmap
-1. [x] Walking skeleton: schema, hook receiver, rules, approvals API, smoke test. Copilot live verification is recorded above; the Claude Code adapter remains untested.
-2. [x] Dashboard Question cards for `ask_user` answers and `/agents` session view.
-3. [ ] React inbox + live updates (replace polling with Postgres LISTEN/NOTIFY + WebSocket)
-4. [ ] PreToolUse enforcement + per-repo YAML policy + audit view
-5. [ ] pgvector precedent memory: embed `approvals.summary` (384-dim), HNSW cosine search, "similar past decisions" badge; seed ~100 labeled commands
-6. [ ] LLM judge for ambiguous cases + eval (precision/recall) + README numbers + demo video
+- Verify the Claude Code adapter, other agents, and Mac/Linux.
+- Consider an optional LLM judge for uncertain commands only.
+- Build and report an independent benchmark.
