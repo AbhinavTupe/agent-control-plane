@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "hooks": {
+    "preToolUse": [
+      {
+        "type": "command",
+        "command": "<python> <repo>/hooks/copilot_hook.py",
+        "timeoutSec": 60
+      }
+    ]
+  }
+}

@@ -5,3 +5,5 @@ __pycache__/
 .pytest_cache/
 node_modules/
 docs/settings.local.json
+.github/hooks/acp.json
+.github/hooks/acp.json.bak

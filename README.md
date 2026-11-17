@@ -69,10 +69,11 @@ Open <http://127.0.0.1:8787>.
 
 ### Connect GitHub Copilot in VS Code
 
-1. Edit `.github/hooks/acp.json` and set its command to use the **absolute path** to this repo's `hooks/copilot_hook.py` and the absolute path to this repo's `.venv\Scripts\python.exe`. For example, replace the command with a form like:
+1. Install the hook using the active Python interpreter:
 
-   ```json
-   "command": "\"C:/absolute/path/agent-control-plane/.venv/Scripts/python.exe\" \"C:/absolute/path/agent-control-plane/hooks/copilot_hook.py\""
+   ```powershell
+   python -m scripts.install_hook
+   python -m scripts.install_hook --check
    ```
 
 2. Open this repository folder itself as the VS Code workspace root (the folder containing `.github`). The hook will not load if the workspace root is a parent or another folder.
