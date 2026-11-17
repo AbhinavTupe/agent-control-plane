@@ -30,7 +30,8 @@ The Copilot hook sends its `preToolUse` request to the local API. The policy eit
 - **Policy engine:** deny rules run before auto-allow rules. Safe-command recognition handles quoted separators and command chains; all unrecognized or uncertain actions require human review.
 - **Question cards:** `ask_user` questions appear in the dashboard with their message and answer choices. The chosen answer is returned by denying the tool call with a reason containing the answer.
 - **Agents panel:** `/agents` lists sessions from the last 24 hours with agent, folder, state, pending count, and last tool.
-- **Dashboard:** vanilla HTML/CSS/JavaScript served by FastAPI, with pending approvals, Approve/Deny controls, recent decisions, sessions, and 1-second polling.
+- **Dashboard:** vanilla HTML/CSS/JavaScript served by FastAPI, with pending approvals, Approve/Deny controls, recent decisions, an Agents panel, and 1-second polling.
+- **Local-only protection:** requests with a non-local Host header, or a foreign Origin on state-changing requests, are rejected (blocks DNS-rebinding and cross-site requests).
 - **Precedent memory:** FastEmbed `BAAI/bge-small-en-v1.5` creates 384-dimensional embeddings stored in pgvector with an HNSW cosine index. Similarity results use human and seed decisions only. They are advisory; the policy engine decides first.
 - **Evaluation:** [Policy evaluation](docs/eval.md) reports results for 112 hand-written cases: after tightening, 0 unsafe auto-allows and 0 over-blocks. The first run auto-denied 22/35 expected-deny cases; six rule gaps were fixed, and seven cases were relabeled to ask after review. This is a regression suite written by the author, not an independent benchmark.
 
@@ -50,6 +51,8 @@ docker compose up -d --wait
 .\.venv\Scripts\python.exe -m server.run
 ```
 
+Run tests: `.\.venv\Scripts\python.exe -m pytest -q`
+
 Open <http://127.0.0.1:8787>.
 
 ### Configuration
@@ -59,6 +62,7 @@ Open <http://127.0.0.1:8787>.
 | `DATABASE_URL` | `postgresql://acp:acp@127.0.0.1:5435/acp` |
 | `ACP_PORT` | `8787` |
 | `ACP_WAIT_SECONDS` | `45` |
+| `ACP_QUESTION_SECONDS` | `50` |
 | `ACP_SIM_MIN` | `0.80` |
 | `ACP_TOKEN` | Optional (unset by default) |
 
@@ -86,7 +90,7 @@ Open <http://127.0.0.1:8787>.
 | Agents panel | `/agents` lists sessions from the last 24 hours with agent, folder, state, pending count, and last tool. Two concurrent Copilot chats were both shown as `waiting`. |
 | Tool names | Observed Copilot tools include `apply_patch`, `ask_user`, `bash`, `powershell`, `rg`, `view`, `skill`, `stop_powershell`, `tool_search_tool`, and Pylance tools. |
 | Similar-decision cards | Precedents appear on a pending card (verified live, incl. retry while the embedding is computed). |
-| Policy evaluation | 112 hand-written cases; the first run auto-denied 22/35 expected-deny cases, six rule gaps were fixed, and seven cases were relabeled to ask after review. After tightening: 0 unsafe auto-allows and 0 over-blocks. This is an author-written regression suite, not an independent benchmark. |
+| Policy evaluation | 112 hand-written cases; 0 unsafe auto-allows and 0 over-blocks after tightening (see docs/eval.md) |
 | Automated tests | `.venv\Scripts\python.exe -m pytest -q`: 229 passed. |
 
 ## Limitations
