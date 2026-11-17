@@ -12,6 +12,7 @@ import hmac
 import json
 import logging
 import os
+from collections import Counter
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -61,6 +62,10 @@ def folder_name(cwd: str | None) -> str:
         return "unknown"
     folder = cwd.rstrip("/\\").replace("\\", "/").rsplit("/", 1)[-1]
     return folder or "unknown"
+
+
+def _normalized_summary(summary: str) -> str:
+    return " ".join(summary.split()).casefold()
 
 
 def compute_agent_state(
@@ -477,10 +482,33 @@ async def list_approvals(request: Request, status: str = "pending", limit: int =
     async with request.app.state.pool.connection() as conn:
         cur = await conn.execute(sql, params + (limit,))
         approvals = await cur.fetchall()
+        if status == "pending":
+            cur = await conn.execute(
+                "SELECT a.tool_name, a.summary, s.cwd "
+                "FROM approvals AS a JOIN sessions AS s ON s.id = a.session_id "
+                "WHERE a.status = 'pending' AND a.tool_name <> 'ask_user' AND s.cwd IS NOT NULL"
+            )
+            pending_identities = await cur.fetchall()
+    if status == "pending":
+        identity_counts = Counter(
+            (row["tool_name"], _normalized_summary(row["summary"]), row["cwd"])
+            for row in pending_identities
+        )
     for approval in approvals:
         approval["folder"] = folder_name(approval["cwd"])
-        if status == "pending" and approval["tool_name"] == "ask_user":
-            approval["question_fields"] = parse_question_fields(approval["tool_input"])
+        if status == "pending":
+            if approval["tool_name"] == "ask_user":
+                approval["question_fields"] = parse_question_fields(approval["tool_input"])
+                approval["identical_count"] = 0
+            elif approval["cwd"] is None:
+                approval["identical_count"] = 0
+            else:
+                key = (
+                    approval["tool_name"],
+                    _normalized_summary(approval["summary"]),
+                    approval["cwd"],
+                )
+                approval["identical_count"] = identity_counts[key] - 1
     return approvals
 
 
@@ -495,7 +523,8 @@ async def similar_approvals(
             """
             WITH query AS (SELECT embedding FROM approvals WHERE id = %s)
             SELECT a.id, a.summary, a.status, a.decided_by,
-                   1 - (a.embedding <=> query.embedding) AS similarity
+                   1 - (a.embedding <=> query.embedding) AS similarity,
+                   a.decided_by = 'seed' AS example
             FROM approvals AS a
             CROSS JOIN query
             WHERE query.embedding IS NOT NULL
@@ -504,7 +533,8 @@ async def similar_approvals(
               AND a.decided_by IN ('human', 'seed')
               AND a.id <> %s
               AND (a.embedding <=> query.embedding) <= %s
-            ORDER BY a.embedding <=> query.embedding
+            ORDER BY CASE WHEN a.decided_by = 'human' THEN 0 ELSE 1 END,
+                     a.embedding <=> query.embedding
             LIMIT %s
             """,
             (aid, aid, 1 - SIM_MIN, limit),
@@ -515,6 +545,7 @@ async def similar_approvals(
 class DecisionIn(BaseModel):
     decision: Literal["allow", "deny"]
     reason: str | None = None
+    apply_to_identical: bool = False
 
 
 class AnswerIn(BaseModel):
@@ -524,17 +555,58 @@ class AnswerIn(BaseModel):
 @app.post("/approvals/{aid}/decide")
 async def decide(aid: int, body: DecisionIn, request: Request):
     status = "allowed" if body.decision == "allow" else "denied"
+    decided_count = 0
     async with request.app.state.pool.connection() as conn:
-        cur = await conn.execute(
-            "UPDATE approvals SET status = %s, decided_by = 'human', reason = %s, decided_at = now() "
-            "WHERE id = %s AND status = 'pending' "
-            "AND NOT (tool_name = 'ask_user' AND %s = 'allow') RETURNING id",
-            (status, body.reason, aid, body.decision),
-        )
-        if not await cur.fetchone():
-            raise HTTPException(status_code=409, detail="approval is not pending")
+        if body.apply_to_identical:
+            async with conn.transaction():
+                cur = await conn.execute(
+                    "SELECT a.tool_name, a.summary, s.cwd "
+                    "FROM approvals AS a LEFT JOIN sessions AS s ON s.id = a.session_id "
+                    "WHERE a.id = %s AND a.status = 'pending'",
+                    (aid,),
+                )
+                target = await cur.fetchone()
+                if not target or (target["tool_name"] == "ask_user" and body.decision == "allow"):
+                    raise HTTPException(status_code=409, detail="approval is not pending")
+
+                approval_ids = [aid]
+                if target["tool_name"] != "ask_user" and target["cwd"] is not None:
+                    cur = await conn.execute(
+                        "SELECT a.id, a.summary "
+                        "FROM approvals AS a JOIN sessions AS s ON s.id = a.session_id "
+                        "WHERE a.status = 'pending' AND a.tool_name = %s "
+                        "AND a.tool_name <> 'ask_user' AND a.id <> %s AND s.cwd = %s",
+                        (target["tool_name"], aid, target["cwd"]),
+                    )
+                    normalized = _normalized_summary(target["summary"])
+                    approval_ids.extend(
+                        row["id"]
+                        for row in await cur.fetchall()
+                        if _normalized_summary(row["summary"]) == normalized
+                    )
+
+                cur = await conn.execute(
+                    "UPDATE approvals SET status = %s, decided_by = 'human', reason = %s, decided_at = now() "
+                    "WHERE id = ANY(%s) AND status = 'pending' "
+                    "AND NOT (tool_name = 'ask_user' AND %s = 'allow') RETURNING id",
+                    (status, body.reason, approval_ids, body.decision),
+                )
+                decided_ids = [row["id"] for row in await cur.fetchall()]
+                if aid not in decided_ids:
+                    raise HTTPException(status_code=409, detail="approval is not pending")
+                decided_count = len(decided_ids)
+        else:
+            cur = await conn.execute(
+                "UPDATE approvals SET status = %s, decided_by = 'human', reason = %s, decided_at = now() "
+                "WHERE id = %s AND status = 'pending' "
+                "AND NOT (tool_name = 'ask_user' AND %s = 'allow') RETURNING id",
+                (status, body.reason, aid, body.decision),
+            )
+            if not await cur.fetchone():
+                raise HTTPException(status_code=409, detail="approval is not pending")
+            decided_count = 1
     _schedule_notification(request.app)
-    return {"id": aid, "status": status}
+    return {"id": aid, "status": status, "decided_count": decided_count}
 
 
 @app.post("/approvals/{aid}/answer")

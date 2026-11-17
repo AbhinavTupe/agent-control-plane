@@ -52,11 +52,12 @@
     .risk-unknown { background: #303949; color: #c4cede; }
     .decision-allowed { background: #163d32; color: #7ce0b1; }
     .decision-denied { background: #4a252b; color: #ff9a9f; }
+    .example { background: #303949; color: #c4cede; }
     .similar.visible { margin-top: 14px; border-top: 1px solid var(--border); padding-top: 12px; }
     .similar h3 { margin: 0 0 8px; font-size: .9rem; }
     .similar-item { display: flex; flex-wrap: wrap; align-items: center; gap: 7px; margin-top: 7px; font-size: .85rem; }
     .similar-summary { flex-basis: 100%; color: #c9d5ea; overflow-wrap: anywhere; }
-    .actions { margin-top: 14px; justify-content: flex-start; }
+    .actions { margin-top: 14px; justify-content: flex-start; flex-wrap: wrap; }
     .question-card { border-color: #7563a8; background: #1d1b2b; }
     .question-label { color: #c8b8ff; }
     .question-message { margin: 12px 0; white-space: pre-wrap; overflow-wrap: anywhere; }
@@ -225,6 +226,17 @@
           deny.textContent = "Deny";
           deny.addEventListener("click", () => decide(approval.id, "deny", reason.value, actions));
           actions.append(reason, approve, deny);
+          const identicalCount = Number(approval.identical_count);
+          if (Number.isInteger(identicalCount) && identicalCount > 0) {
+            const approveAll = document.createElement("button");
+            approveAll.textContent = "Approve all " + (identicalCount + 1) + " identical";
+            approveAll.addEventListener("click", () => decide(approval.id, "allow", "", actions, true));
+            const denyAll = document.createElement("button");
+            denyAll.className = "deny";
+            denyAll.textContent = "Deny all " + (identicalCount + 1) + " identical";
+            denyAll.addEventListener("click", () => decide(approval.id, "deny", reason.value, actions, true));
+            actions.append(approveAll, denyAll);
+          }
           card.appendChild(actions);
         }
         pendingList.appendChild(card);
@@ -362,7 +374,7 @@
         container.appendChild(heading);
         const grouped = new Map();
         for (const item of items) {
-          const groupKey = JSON.stringify([text(item.summary), text(item.status)]);
+          const groupKey = JSON.stringify([text(item.summary), text(item.status), item.example === true]);
           const existing = grouped.get(groupKey);
           if (!existing) {
             grouped.set(groupKey, { item, count: 1 });
@@ -385,10 +397,17 @@
             + (Number.isFinite(similarity) ? " " + (similarity * 100).toFixed(0) + "%" : "")
             + " by " + text(item.decided_by)
             + (count > 1 ? " ×" + count : "");
+          entry.appendChild(decision);
+          if (item.example === true) {
+            const example = document.createElement("span");
+            example.className = "badge example";
+            example.textContent = "example";
+            entry.appendChild(example);
+          }
           const summary = document.createElement("span");
           summary.className = "similar-summary";
           summary.textContent = text(item.summary);
-          entry.append(decision, summary);
+          entry.appendChild(summary);
           container.appendChild(entry);
         }
       });
@@ -489,12 +508,13 @@
       return response.json();
     }
 
-    async function decide(id, decision, reason, actions) {
+    async function decide(id, decision, reason, actions, applyToIdentical = false) {
       actions.querySelectorAll("button").forEach(button => { button.disabled = true; });
       errorLine.textContent = "";
       try {
         const body = { decision };
         if (decision === "deny" && reason.trim()) body.reason = reason.trim();
+        if (applyToIdentical) body.apply_to_identical = true;
         const response = await fetch("/approvals/" + encodeURIComponent(id) + "/decide", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
