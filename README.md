@@ -28,6 +28,7 @@ The Copilot hook sends its `preToolUse` request to the local API. The policy eit
 ## Features
 
 - **Policy engine:** deny rules run before auto-allow rules. Safe-command recognition handles quoted separators and command chains; all unrecognized or uncertain actions require human review.
+- **Per-repo rules:** an optional `.acp-policy.yml` in a repository or one of its parent directories can add case-insensitive substring deny/ask rules. These rules can only make decisions more restrictive; invalid files are ignored and the built-in policy remains in effect. See [.acp-policy.example.yml](./.acp-policy.example.yml).
 - **Question cards:** `ask_user` questions appear in the dashboard with their message and answer choices. The chosen answer is returned by denying the tool call with a reason containing the answer.
 - **Agents panel:** `/agents` lists sessions from the last 24 hours with agent, folder, state, pending count, and last tool.
 - **Dashboard:** vanilla HTML/CSS/JavaScript served by FastAPI, with pending approvals, Approve/Deny controls, recent decisions, an Agents panel, and 1-second polling.

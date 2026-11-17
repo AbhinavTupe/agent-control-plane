@@ -1,0 +1,6 @@
+deny_contains:
+  - "terraform apply"
+  - "git push --force"
+ask_contains:
+  - "docker compose down"
+  - "npm publish"

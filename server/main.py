@@ -34,6 +34,7 @@ from .policy import (
     question_summary,
     summarize,
 )
+from .repo_policy import apply_repo_rules, load_repo_rules
 
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://acp:acp@127.0.0.1:5435/acp")
 TOKEN = os.getenv("ACP_TOKEN", "")
@@ -269,6 +270,7 @@ async def copilot_hook(request: Request):
     return await _permission(
         request, normalized, sid, response=copilot_perm_response,
         classification_tool=classification_tool,
+        repo_cwd=p.get("cwd"),
     )
 
 
@@ -310,11 +312,22 @@ async def _permission(
     sid: str,
     response: Callable[[str, str | None], dict] = perm_response,
     classification_tool: str | None = None,
+    repo_cwd: str | None = None,
 ) -> dict:
     pool = request.app.state.pool
     tool = p.get("tool_name") or ""
     tin = p.get("tool_input") or {}
     verdict = classify(classification_tool or tool, tin)
+    if tool != "ask_user":
+        try:
+            rules = load_repo_rules(repo_cwd if repo_cwd is not None else p.get("cwd"))
+            if classification_tool in {"Bash", "PowerShell"} or tool in {"Bash", "PowerShell"}:
+                policy_text = str(tin.get("command", ""))
+            else:
+                policy_text = summarize(tool, tin)
+            verdict = apply_repo_rules(verdict, policy_text, rules)
+        except Exception:
+            logger.exception("repository policy application failed; keeping built-in decision")
     initial = {"allow": "allowed", "deny": "denied"}.get(verdict.action, "pending")
     summary = question_summary(tin) if tool == "ask_user" else summarize(tool, tin)
     decided = initial != "pending"
