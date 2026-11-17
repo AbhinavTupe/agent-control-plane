@@ -77,10 +77,15 @@ Open <http://127.0.0.1:8787>.
 2. Open this repository folder itself as the VS Code workspace root (the folder containing `.github`). The hook will not load if the workspace root is a parent or another folder.
 3. Use Copilot Chat normally. Requests routed to a person appear in the dashboard inbox.
 
+### Troubleshooting
+
+Hooks load only if the VS Code workspace root is the folder that directly contains `.github` (open the inner agent-control-plane folder, not its parent).
+
 ## Verified with GitHub Copilot in VS Code
 
 | Check | Result |
 |---|---|
+| Server down | The hook prints `{}` and Copilot falls back to its own approval prompt; no hang, no auto-allow (verified live 2026-11-17). |
 | Deny | Copilot displays the hook's denial reason. |
 | Auto-allow | `git status` proceeds and is recorded as decided by policy. |
 | Human approval | A pending command proceeds after approval in the dashboard. |

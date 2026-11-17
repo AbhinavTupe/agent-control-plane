@@ -12,4 +12,5 @@
 | 45-second timeout | The hook returns `{}`, Copilot shows its own prompt, and the row is expired/timeout. | After 45 seconds, the hook returns `{}`, Copilot shows its own prompt, and the row is expired/timeout. | observed |
 | Chained commands | A chained command is handled as one line for deny-pattern matching. | Commands joined with `;` or `|` arrive as one string; any deny pattern blocks the whole line. | observed |
 | Hook loading | The hook loads when the VS Code workspace root contains `.github/hooks`. | The hook loads only if the VS Code workspace root is the folder containing `.github/hooks`. | observed |
-| Server down | Record the hook behavior when the server is unavailable. | Untested. | untested |
+
+Server-down behavior was verified live on 2026-11-17: the hook prints `{}` and Copilot falls back to its own approval prompt, with no hang or auto-allow.

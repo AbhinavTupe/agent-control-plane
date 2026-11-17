@@ -49,8 +49,8 @@ python -m pytest -q               # policy tests
 - Auto-allow (`git status`) works; `decided_by=policy`.
 - After 45 seconds, the hook returns `{}`, Copilot shows its own prompt, and the row is expired/timeout.
 - Chained commands (`;` or `|`) arrive as one string; any deny pattern blocks the whole line.
-- The hook loads only if the VS Code workspace root is the folder containing `.github/hooks`.
-- Server-down behavior is untested.
+- The hook loads only if the VS Code workspace root is the folder that directly contains `.github`.
+- Server down: the hook prints `{}` and Copilot falls back to its own approval prompt; no hang, no auto-allow (verified live 2026-11-17).
 
 ## Known limitation
 `PermissionRequest` only fires when Claude Code would have prompted anyway. To enforce blocks on commands the user's settings already allow, add a `PreToolUse` hook (Step 3).
