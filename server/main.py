@@ -352,7 +352,7 @@ async def list_agents(request: Request):
                 JOIN recent_sessions AS s ON s.id = a.session_id
                 WHERE a.status = 'pending'
                 GROUP BY a.session_id
-            ),
+            )
             SELECT s.id, s.agent, s.cwd, s.last_seen_at,
                    COALESCE(p.pending_count, 0) AS pending_count,
                    a.last_tool, LEFT(a.last_summary, 120) AS last_summary

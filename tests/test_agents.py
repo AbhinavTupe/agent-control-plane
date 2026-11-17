@@ -1,12 +1,18 @@
 import asyncio
+import sys
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
+import psycopg
 import pytest
+from fastapi.testclient import TestClient
 
 from server.main import (
+    DATABASE_URL,
+    TOKEN,
     UPSERT_SESSION,
+    app,
     compute_agent_state,
     copilot_hook,
     folder_name,
@@ -90,6 +96,28 @@ def test_agents_query_excludes_seed_session():
     asyncio.run(list_agents(fake_request(pool)))
 
     assert "WHERE id <> 'seed'" in pool.calls[0][0]
+
+
+def test_agents_endpoint_with_postgres(monkeypatch):
+    monkeypatch.setenv("ACP_ALLOW_TESTCLIENT", "1")
+    try:
+        with psycopg.connect(DATABASE_URL, connect_timeout=2):
+            pass
+    except psycopg.OperationalError as exc:
+        pytest.skip(f"Postgres is unavailable: {exc}")
+
+    policy = asyncio.get_event_loop_policy()
+    if sys.platform == "win32":
+        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+    try:
+        with TestClient(app) as client:
+            response = client.get("/agents", headers={"x-acp-token": TOKEN})
+    finally:
+        if sys.platform == "win32":
+            asyncio.set_event_loop_policy(policy)
+
+    assert response.status_code == 200
+    assert isinstance(response.json(), list)
 
 
 @pytest.mark.parametrize(
