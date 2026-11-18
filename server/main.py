@@ -27,6 +27,11 @@ from pydantic import BaseModel, Field
 
 from .embed import embed, to_pgvector
 from .events import EventBroadcaster, listen_for_events, notify_changed
+from .notify import (
+    DecisionNotification,
+    log_enabled_channels,
+    schedule_human_decision,
+)
 from .policy import (
     classify,
     question_answer_reply,
@@ -85,6 +90,7 @@ def compute_agent_state(
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    log_enabled_channels()
     pool = AsyncConnectionPool(
         DATABASE_URL, min_size=1, max_size=10, open=False,
         kwargs={"row_factory": dict_row, "autocommit": True},
@@ -186,6 +192,8 @@ async def dashboard_events(request: Request):
                     yield ": ping\n\n"
                 else:
                     yield "data: changed\n\n"
+        except asyncio.CancelledError:
+            raise
         finally:
             request.app.state.event_broadcaster.unsubscribe(queue)
 
@@ -226,7 +234,7 @@ async def hook(request: Request):
     _schedule_notification(request.app)
     if kind != "PermissionRequest":
         return {}
-    return await _permission(request, p, sid)
+    return await _permission(request, p, sid, agent="claude-code")
 
 
 @app.post("/hook/copilot")
@@ -276,6 +284,7 @@ async def copilot_hook(request: Request):
         request, normalized, sid, response=copilot_perm_response,
         classification_tool=classification_tool,
         repo_cwd=p.get("cwd"),
+        agent="copilot",
     )
 
 
@@ -318,6 +327,7 @@ async def _permission(
     response: Callable[[str, str | None], dict] = perm_response,
     classification_tool: str | None = None,
     repo_cwd: str | None = None,
+    agent: str = "unknown",
 ) -> dict:
     pool = request.app.state.pool
     tool = p.get("tool_name") or ""
@@ -346,6 +356,18 @@ async def _permission(
         )
         aid = (await cur.fetchone())["id"]
     _schedule_notification(request.app)
+    if initial == "pending":
+        try:
+            schedule_human_decision(
+                DecisionNotification(
+                    agent=agent,
+                    risk=verdict.risk,
+                    summary=summary,
+                    question=tool == "ask_user",
+                )
+            )
+        except Exception:
+            logger.exception("human-decision notification scheduling failed")
 
     if tool != "ask_user":
         _schedule_task(

@@ -73,6 +73,10 @@ Open <http://127.0.0.1:8787>.
 | `ACP_SIM_MIN` | `0.80` |
 | `ACP_TOKEN` | Optional (unset by default) |
 
+### Notifications
+
+Notifications are off by default. Set `ACP_NOTIFY_DESKTOP=1` for Windows desktop toasts, labelled "Windows PowerShell", or `ACP_NTFY_TOPIC=<topic>` for phone alerts via ntfy; optionally set `ACP_NTFY_SERVER` (default `https://ntfy.sh`) and `ACP_NTFY_DETAIL=1` to include command/question summaries. Desktop toasts and phone alerts were both verified live on Windows. ntfy topics are case-sensitive and effectively a password; use a long random topic for real use and keep it private. By default, alerts contain no command text. Phone alerts are inform-only and do not approve or deny requests.
+
 ### Connect GitHub Copilot in VS Code
 
 1. Install the hook using the active Python interpreter:
@@ -82,12 +86,12 @@ Open <http://127.0.0.1:8787>.
    python -m scripts.install_hook --check
    ```
 
-2. Open this repository folder itself as the VS Code workspace root (the folder containing `.github`). The hook will not load if the workspace root is a parent or another folder.
+2. Open the repo root (the folder that directly contains `.github`) as the VS Code workspace.
 3. Use Copilot Chat normally. Requests routed to a person appear in the dashboard inbox.
 
 ### Troubleshooting
 
-Hooks load only if the VS Code workspace root is the folder that directly contains `.github` (open the inner agent-control-plane folder, not its parent).
+Hooks load only if the VS Code workspace is the repo root (the folder that directly contains `.github`).
 
 ## Demo
 
