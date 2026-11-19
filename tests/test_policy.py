@@ -60,6 +60,76 @@ def test_chained_safe_prefix_is_not_allowed():
 
 
 @pytest.mark.parametrize("cmd", [
+    "git tag --list",
+    "git rev-parse --short HEAD",
+    "git ls-files server",
+    "git grep -n -F needle server",
+    "pwd",
+    "Get-Location",
+    "pip --version",
+    "python -m pip freeze",
+    "python --version",
+    "npm -v",
+    "npm outdated --json",
+    "npm audit --omit=dev",
+    "docker ps -a",
+    "docker images -q",
+    "docker compose ps -q",
+    "docker compose logs --tail=20 --no-color api",
+    "tasklist /svc",
+    "netstat -ano",
+    "Get-ScheduledTask",
+    "type README.md",
+    "rg -n needle server",
+    "grep -i needle README.md",
+])
+@pytest.mark.parametrize("classify_shell", [bash, powershell])
+def test_narrow_read_only_commands_are_allowed(classify_shell, cmd):
+    assert classify_shell(cmd).action == "allow", cmd
+
+
+@pytest.mark.parametrize("cmd", [
+    "git tag foo",
+    "git tag -d x",
+    "git grep -O sh x",
+    "npm audit fix",
+    "docker compose logs -f",
+    "rg --pre sh x",
+    r"type C:\Windows\x",
+    r"type ..\x",
+    "pwd; rm -rf /",
+    "pwd && calc",
+    "git ls-files | sh",
+    "git tag --list > f",
+    "tasklist $(x)",
+    "grep x file > out",
+    "type .env",
+    r"type \\server\share\file",
+    "type ~/notes.txt",
+    "type folder/../notes.txt",
+    "type %USERPROFILE%/notes.txt",
+    "type folder/.ssh/config",
+    "type folder/.aws/config",
+    "type folder/credentials.txt",
+    "type folder/id_rsa",
+    "type folder/secret.txt",
+    "type folder/token.txt",
+    "rg --hostname-bin sh x",
+    "rg -exec sh x",
+    "rg --output sh x",
+    "rg -z sh x",
+    "rg --search-zip sh x",
+    "git grep needle -O",
+    "git tag --list -d",
+    "rg needle --pre",
+    "rg %1% pattern",
+])
+@pytest.mark.parametrize("classify_shell", [bash, powershell])
+def test_narrow_read_only_allowlist_rejects_bypasses(classify_shell, cmd):
+    assert classify_shell(cmd).action != "allow", cmd
+
+
+@pytest.mark.parametrize("cmd", [
     "echo hi; rm -rf /",
     "echo hi && format c:",
     "rg foo; vssadmin delete shadows /all /quiet",

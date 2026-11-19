@@ -242,6 +242,152 @@ def _safe_command_segments(cmd: str) -> list[str] | None:
     return segments
 
 
+def _literal_command_tokens(cmd: str) -> list[str] | None:
+    if any(char in cmd for char in "\r\n$`") or re.search(
+        r"%[^%\s]+%", cmd,
+    ):
+        return None
+    tokens: list[str] = []
+    token: list[str] = []
+    quote: str | None = None
+    active = False
+    for index, char in enumerate(cmd):
+        if quote:
+            if char == quote:
+                quote = None
+            elif char == "\\" and quote == '"' and cmd[index + 1:index + 2] == '"':
+                return None
+            else:
+                token.append(char)
+        elif char in "'\"":
+            quote = char
+            active = True
+        elif char in ";&|<>(){}":
+            return None
+        elif char.isspace():
+            if active:
+                tokens.append("".join(token))
+                token = []
+                active = False
+        else:
+            token.append(char)
+            active = True
+    if quote:
+        return None
+    if active:
+        tokens.append("".join(token))
+    return tokens or None
+
+
+_UNSAFE_RELATIVE_PATH = re.compile(
+    r"(?:"
+    r"^(?:/|\\|[A-Za-z]:[\\/]|~(?:[\\/]|$))|"
+    r"(?:^|[\\/])\.\.(?:[\\/]|$)|"
+    r"\.env|\.ssh|\.aws|credentials|id_rsa|secret|token"
+    r")",
+    re.I,
+)
+
+
+def _safe_relative_path(value: str) -> bool:
+    return bool(value) and not _UNSAFE_RELATIVE_PATH.search(value)
+
+
+def _narrow_read_only_allow(cmd: str) -> bool:
+    tokens = _literal_command_tokens(cmd)
+    if not tokens:
+        return False
+    words = [token.lower() for token in tokens]
+    command = words[0]
+
+    def paths_are_safe(paths: list[str]) -> bool:
+        return all(_safe_relative_path(path) for path in paths)
+
+    if command == "git":
+        args = words[1:]
+        if args == ["tag"] or args in (["tag", "--list"], ["tag", "-l"]):
+            return True
+        if len(args) == 3 and args[0] == "tag" and args[1] in {"--list", "-l"}:
+            return not tokens[3].startswith("-") and _safe_relative_path(tokens[3])
+        if args in (["rev-parse", "head"], ["rev-parse", "--short", "head"],
+                    ["rev-parse", "--abbrev-ref", "head"]):
+            return True
+        if args == ["ls-files"]:
+            return True
+        if len(args) == 2 and args[0] == "ls-files":
+            return not tokens[2].startswith("-") and paths_are_safe(tokens[2:])
+        if len(args) >= 2 and args[0] == "grep":
+            options = {"-n", "-i", "-F", "-l", "-c", "-w"}
+            index = 1
+            while index < len(args) and tokens[index + 1] in options:
+                index += 1
+            if index < len(args) and not args[index].startswith("-"):
+                paths = tokens[index + 2:]
+                return all(not path.startswith("-") for path in paths) and paths_are_safe(paths)
+        return False
+
+    if command in {"pwd", "get-location"}:
+        return len(tokens) == 1
+    if command == "pip":
+        return words[1:] in (["--version"], ["freeze"], ["list"]) or (
+            len(words) == 3 and words[1] == "list"
+            and words[2].startswith("--format=")
+            and bool(words[2][9:])
+        )
+    if command == "python":
+        return words[1:] == ["--version"] or words[1:] == ["-m", "pip", "--version"] or (
+            words[1:] in (["-m", "pip", "freeze"], ["-m", "pip", "list"])
+        ) or (
+            len(words) == 5 and words[1:4] == ["-m", "pip", "list"]
+            and words[4].startswith("--format=") and bool(words[4][9:])
+        )
+    if command == "npm":
+        args = words[1:]
+        return (
+            args in (["--version"], ["-v"])
+            or args in (["outdated"], ["outdated", "--json"], ["outdated", "--long"])
+            or args in (["audit"], ["audit", "--json"], ["audit", "--omit=dev"])
+        )
+    if command == "docker":
+        args = words[1:]
+        if args and args[0] in {"ps", "images"}:
+            return len(args) == 1 or (len(args) == 2 and args[1] in {"-a", "-q"})
+        if len(args) >= 2 and args[:2] == ["compose", "ps"]:
+            return len(args) == 2 or (len(args) == 3 and args[2] in {"-a", "-q"})
+        if len(args) >= 2 and args[:2] == ["compose", "logs"]:
+            index = 2
+            if index < len(args) and re.fullmatch(r"--tail=\d+", args[index]):
+                index += 1
+            if index < len(args) and args[index] == "--no-color":
+                index += 1
+            if index == len(args):
+                return True
+            return (
+                index + 1 == len(args)
+                and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", tokens[index + 1])
+                is not None
+            )
+        return False
+    if command == "tasklist":
+        return words[1:] in ([], ["/svc"], ["/v"])
+    if command == "netstat":
+        return words[1:] in (["-an"], ["-ano"])
+    if command == "get-scheduledtask":
+        return len(tokens) == 1
+    if command == "type":
+        return len(tokens) == 2 and _safe_relative_path(tokens[1])
+    if command in {"rg", "grep"}:
+        options = {"-n", "-i", "-F", "-l", "-c", "-w", "-r", "--no-heading"}
+        index = 1
+        while index < len(words) and tokens[index] in options:
+            index += 1
+        if index >= len(words) or words[index].startswith("-"):
+            return False
+        paths = tokens[index + 1:]
+        return all(not path.startswith("-") for path in paths) and paths_are_safe(paths)
+    return False
+
+
 def _rm_verdict(cmd: str) -> Verdict | None:
     if not _RM_RECURSIVE.search(cmd):
         return None
@@ -587,7 +733,14 @@ def classify_bash(cmd: str) -> Verdict:
                 else:
                     verdict = Verdict("ask", "medium", "needs human review")
         strictest = _strictest(strictest, verdict)
-    return strictest or Verdict("ask", "medium", "needs human review")
+    result = strictest or Verdict("ask", "medium", "needs human review")
+    if (
+        result.action == "ask"
+        and result.reason in {"needs human review", "literal text or read-only search"}
+        and _narrow_read_only_allow(original)
+    ):
+        return Verdict("allow", "low", "narrow read-only command")
+    return result
 
 
 def classify_powershell(cmd: str) -> Verdict:
@@ -659,7 +812,14 @@ def classify_powershell(cmd: str) -> Verdict:
                 else:
                     verdict = Verdict("ask", "medium", "needs human review")
         strictest = _strictest(strictest, verdict)
-    return strictest or Verdict("ask", "medium", "needs human review")
+    result = strictest or Verdict("ask", "medium", "needs human review")
+    if (
+        result.action == "ask"
+        and result.reason in {"needs human review", "literal text or read-only search"}
+        and _narrow_read_only_allow(original)
+    ):
+        return Verdict("allow", "low", "narrow read-only command")
+    return result
 
 
 def _path(tool_input: dict) -> str:
