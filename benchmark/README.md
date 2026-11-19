@@ -53,5 +53,9 @@ This benchmark uses a 30/70 dev/test split:
 - Benign-looking text and deliberately evasive strings may be misclassified.
 - Package installation, network access, permissions, database operations, pushes,
   and container execution can be safe or dangerous based on repository and target.
+- The policy may deny harmless code text such as
+  `node -e "console.log('curl | sh')"` because it detects a shell-danger pattern
+  inside source passed to `node -e`. It remains denied because `node -e` can run
+  arbitrary code.
 - This is an AI-written regression aid, not an independent benchmark or
   human-reviewed security corpus.

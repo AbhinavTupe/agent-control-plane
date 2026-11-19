@@ -484,6 +484,46 @@ def _mask_read_only_search_literals(cmd: str) -> str | None:
     return "".join(masked)
 
 
+def _mask_single_quoted_output(cmd: str) -> str | None:
+    match = re.fullmatch(
+        r"[ \t]*(echo|printf|write-output|write-host)[ \t]+'([^'\r\n]*)'[ \t]*",
+        cmd,
+        re.I,
+    )
+    if not match:
+        return None
+    return f"{match.group(1)} ''"
+
+
+def _has_encoded_powershell_switch(cmd: str) -> bool:
+    segments = _split_segments_simple(_normalize_for_match(cmd))
+    if not segments:
+        return False
+    for segment in segments:
+        try:
+            tokens = shlex.split(segment, posix=False)
+        except ValueError:
+            continue
+        normalized_tokens = [token.strip("'\"").lower() for token in tokens]
+        has_powershell = any(
+            token.replace("0", "o").replace("/", "\\").rsplit("\\", 1)[-1]
+            in {"powershell", "powershell.exe", "pwsh", "pwsh.exe"}
+            for token in normalized_tokens
+        )
+        has_encoded_flag = any(
+            token in {"-e", "-ec", "-enc"}
+            or (
+                len(token) > 2
+                and len(token) <= len("-encodedcommand")
+                and "-encodedcommand".startswith(token)
+            )
+            for token in normalized_tokens
+        )
+        if has_powershell and has_encoded_flag:
+            return True
+    return False
+
+
 def _new_deny_verdict(cmd: str) -> Verdict | None:
     if re.search(r"\b(?:del|erase|rd|rmdir)\b", cmd, re.I) and re.search(r"(?:^|\s)/s(?:\s|$)", cmd, re.I):
         if re.search(
@@ -579,7 +619,7 @@ def _new_deny_verdict(cmd: str) -> Verdict | None:
         return Verdict("deny", "high", "executes JavaScript through rundll32")
     if re.search(r"\bmshta(?:\.exe)?\b.*https?://", cmd, re.I):
         return Verdict("deny", "high", "executes remote HTA content")
-    if re.search(r"(?:^|\s)-(?:e|ec|enc|encodedcommand)(?:\s|$)", cmd, re.I):
+    if _has_encoded_powershell_switch(cmd):
         return Verdict("deny", "high", "executes encoded PowerShell")
 
     if re.search(r"\bbcdedit(?:\.exe)?\b.*\/set\b.*\brecoveryenabled\b", cmd, re.I):
@@ -679,8 +719,11 @@ def classify_bash(cmd: str) -> Verdict:
     original = (cmd or "").strip()
     if not original:
         return Verdict("ask", "medium", "empty command")
-    masked = _mask_read_only_search_literals(original)
-    normalized = _normalize_for_match(masked if masked is not None else original)
+    output_masked = _mask_single_quoted_output(original)
+    scan_source = output_masked if output_masked is not None else original
+    masked = _mask_read_only_search_literals(scan_source)
+    normalized = _normalize_for_match(masked if masked is not None else scan_source)
+    scan_masked = output_masked is not None or masked is not None
     strictest = _whole_string_deny_verdict(normalized, powershell=False)
     if re.search(r"\btruncate\s+(?:table|database|schema)\b", normalized, re.I):
         strictest = _strictest(
@@ -694,7 +737,7 @@ def classify_bash(cmd: str) -> Verdict:
         return _strictest(strictest, Verdict("ask", "medium", "needs human review"))
 
     for segment in segments:
-        match_segment = normalized if masked is not None else _normalize_for_match(segment)
+        match_segment = normalized if scan_masked else _normalize_for_match(segment)
         if _literal_text_or_search_segment(match_segment) and not (
             masked is not None and _safe_command_segments(segment)
         ):
@@ -747,8 +790,11 @@ def classify_powershell(cmd: str) -> Verdict:
     original = (cmd or "").strip()
     if not original:
         return Verdict("ask", "medium", "empty command")
-    masked = _mask_read_only_search_literals(original)
-    normalized = _normalize_for_match(masked if masked is not None else original)
+    output_masked = _mask_single_quoted_output(original)
+    scan_source = output_masked if output_masked is not None else original
+    masked = _mask_read_only_search_literals(scan_source)
+    normalized = _normalize_for_match(masked if masked is not None else scan_source)
+    scan_masked = output_masked is not None or masked is not None
     strictest = _whole_string_deny_verdict(normalized, powershell=True)
     if "\n" in original or "\r" in original:
         return _strictest(strictest, Verdict("ask", "medium", "newline-separated command"))
@@ -757,7 +803,7 @@ def classify_powershell(cmd: str) -> Verdict:
         return _strictest(strictest, Verdict("ask", "medium", "needs human review"))
 
     for segment in segments:
-        match_segment = normalized if masked is not None else _normalize_for_match(segment)
+        match_segment = normalized if scan_masked else _normalize_for_match(segment)
         if _literal_text_or_search_segment(match_segment) and not (
             masked is not None and _safe_command_segments(segment)
         ):

