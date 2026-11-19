@@ -77,6 +77,31 @@ _auth_lock = threading.Lock()
 _hook_auth_warning_lock = threading.Lock()
 _last_hook_auth_warning: float | None = None
 
+
+class PollingAccessLogFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        args = record.args
+        if (
+            record.name != "uvicorn.access"
+            or not isinstance(args, tuple)
+            or len(args) < 5
+        ):
+            return True
+
+        method, target, status_code = args[1], args[2], args[4]
+        if method != "GET" or status_code != 200 or not isinstance(target, str):
+            return True
+        return target.partition("?")[0] not in {"/auth/status", "/healthz"}
+
+
+def _install_access_log_filter() -> None:
+    access_logger = logging.getLogger("uvicorn.access")
+    if not any(
+        isinstance(item, PollingAccessLogFilter) for item in access_logger.filters
+    ):
+        access_logger.addFilter(PollingAccessLogFilter())
+
+
 UPSERT_SESSION = """
 INSERT INTO sessions (id, agent, cwd, model, status) VALUES (%s, %s, %s, %s, %s)
 ON CONFLICT (id) DO UPDATE SET
@@ -116,6 +141,7 @@ def compute_agent_state(
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    _install_access_log_filter()
     log_enabled_channels()
     pool = AsyncConnectionPool(
         DATABASE_URL, min_size=1, max_size=10, open=False,
@@ -337,6 +363,7 @@ async def dashboard(request: Request):
     return FileResponse(
         Path(__file__).parent / "static" / "index.html",
         status_code=status_code,
+        headers={"Cache-Control": "no-store"},
     )
 
 
