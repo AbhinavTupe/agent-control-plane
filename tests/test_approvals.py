@@ -8,7 +8,7 @@ import pytest
 from fastapi.testclient import TestClient
 from psycopg.types.json import Jsonb
 
-from server.main import DATABASE_URL, TOKEN, app
+from server.main import DATABASE_URL, app
 
 
 def _require_postgres():
@@ -95,7 +95,7 @@ def test_identical_approval_batch_is_scoped_and_only_decides_pending(monkeypatch
     notifications = []
     try:
         with _dashboard_client(monkeypatch, notifications) as client:
-            headers = {"x-acp-token": TOKEN}
+            headers = {}
             pending = client.get(
                 "/approvals?status=pending&limit=200", headers=headers
             ).json()
@@ -166,7 +166,6 @@ def test_similar_approvals_prioritize_humans_then_mark_seed_examples(monkeypatch
         with _dashboard_client(monkeypatch, []) as client:
             response = client.get(
                 f"/approvals/{ids['query']}/similar?limit=3",
-                headers={"x-acp-token": TOKEN},
             )
         assert response.status_code == 200
         examples = response.json()

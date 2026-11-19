@@ -109,7 +109,17 @@ Open <http://127.0.0.1:8787>.
 | `ACP_WAIT_SECONDS` | `45` |
 | `ACP_QUESTION_SECONDS` | `50` |
 | `ACP_SIM_MIN` | `0.80` |
-| `ACP_TOKEN` | Optional (unset by default) |
+| `ACP_TOKEN` | Optional; takes precedence over `.acp-token` when non-empty |
+
+### Dashboard login
+
+Set a token with `.\.venv\Scripts\python.exe -m scripts.set_token`; use `--force` to replace an existing `.acp-token`. The command prints only the file path. The server and hooks use a non-empty `ACP_TOKEN` environment variable first, otherwise the stripped first line of `.acp-token` in the repository root. If both are missing or empty, login is disabled and the existing open-dashboard behavior is unchanged.
+
+When a token is configured, open the dashboard and enter it in the login form. A successful login sets an in-memory, 12-hour `HttpOnly`, `SameSite=Strict` session cookie; HTTPS requests also receive a `Secure` cookie. Failed logins are limited to five per minute per client IP. Use **Logout** to invalidate the session. Hook requests authenticate with the `X-ACP-Token` header. `python -m scripts.install_hook --check` reports whether a token is available from the environment or file.
+
+### Audit view
+
+Select **Audit** in the dashboard to search approval history by time range, agent, status, risk, decision source, or a substring of the command/summary. Results are newest first and paginated; **Export CSV** downloads up to 5,000 matching rows with spreadsheet formula cells neutralized. The database records `human`, `policy`, `timeout`, `client_gone`, and synthetic `seed` decision sources; it does not distinguish automatic decisions from repository-rule decisions.
 
 ### Notifications
 
@@ -161,7 +171,7 @@ Hooks load only if the VS Code workspace is the repo root (the folder that direc
 | Tool names | Observed Copilot tools include `apply_patch`, `ask_user`, `bash`, `powershell`, `rg`, `view`, `skill`, `stop_powershell`, `tool_search_tool`, and Pylance tools. |
 | Similar-decision cards | Precedents appear on a pending card (verified live, incl. retry while the embedding is computed); synthetic seeds are badged "example". |
 | Policy evaluation | 112-case regression suite; 0 unsafe auto-allows (not an independent benchmark; see docs/eval.md). |
-| Automated tests | `.venv\Scripts\python.exe -m pytest -q`: 268 passed. |
+| Automated tests | `.venv\Scripts\python.exe -m pytest -q`: 715 passed. |
 
 ## Limitations / Roadmap
 
@@ -172,7 +182,7 @@ Hooks load only if the VS Code workspace is the repo root (the folder that direc
 - Returning an `ask_user` answer denies the tool call with the answer in its reason. Copilot's UI labels this "Ask User failed" (cosmetic); this relies on the model following the message and has been tested in one setup only.
 - Only Copilot is verified for the Agents panel; the Claude Code adapter is untested.
 - `rg` and `view` are read-only, but sensitive paths still ask for approval. Unknown tools always ask, so some Copilot tools still wait for a human.
-- This is a single-user local service. `ACP_TOKEN` is optional; the dashboard does not send the token, so enabling it also requires a way to authenticate dashboard API requests.
+- This is a single-user local service. `ACP_TOKEN` is optional; when set, use the dashboard login form to obtain a session cookie.
 - The 81 seed decisions are synthetic and hand-labeled.
 - Embeddings capture topic, not risk. For example, `docker compose down` scores about 82% similar to `docker compose logs`; precedent matches are advisory and policy always decides first.
 - Consider an optional LLM judge for uncertain commands only.

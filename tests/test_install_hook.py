@@ -1,6 +1,9 @@
 import json
 import sys
+import urllib.error
 from pathlib import Path
+
+import pytest
 
 from scripts.install_hook import main
 
@@ -87,7 +90,10 @@ def test_print_does_not_write(tmp_path, capsys):
 def test_check_fails_when_hook_script_is_missing(tmp_path, monkeypatch):
     repo_root = tmp_path / "repo"
     main([], repo_root=repo_root, python_executable=sys.executable)
-    monkeypatch.setattr("scripts.install_hook._check_health", lambda: ("WARN", "server unavailable"))
+    monkeypatch.setattr(
+        "scripts.install_hook._check_health",
+        lambda _token="": ("WARN", "server unavailable"),
+    )
     output = []
 
     result = main(
@@ -109,8 +115,9 @@ def test_check_warns_when_server_is_unavailable_without_failing(tmp_path, monkey
     main([], repo_root=repo_root, python_executable=sys.executable)
     monkeypatch.setattr(
         "scripts.install_hook._check_health",
-        lambda: ("WARN", "server is unavailable"),
+        lambda _token="": ("WARN", "server is unavailable"),
     )
+    monkeypatch.delenv("ACP_TOKEN", raising=False)
     output = []
 
     result = main(
@@ -122,9 +129,129 @@ def test_check_warns_when_server_is_unavailable_without_failing(tmp_path, monkey
 
     assert result == 0
     assert [line.split(" ", 1)[0] for line in output] == [
+        "WARN",
         "PASS",
         "PASS",
         "WARN",
         "PASS",
     ]
+    assert "WARN token: missing" in output
     assert any("VS Code must open THIS folder as the workspace root:" in line for line in output)
+
+
+@pytest.mark.parametrize(
+    ("token_env", "token_file", "expected"),
+    [
+        ("environment-secret", "file-secret\n", "PASS token: found (env)"),
+        ("", " file-secret \nignored\n", "PASS token: found (file)"),
+        ("", "", "WARN token: missing"),
+    ],
+)
+def test_check_reports_token_source(
+    tmp_path, monkeypatch, token_env, token_file, expected
+):
+    repo_root = tmp_path / "repo"
+    script_path = repo_root / "hooks" / "copilot_hook.py"
+    script_path.parent.mkdir(parents=True)
+    script_path.write_text("print('{}')\n", encoding="utf-8")
+    main([], repo_root=repo_root, python_executable=sys.executable)
+    (repo_root / ".acp-token").write_text(token_file, encoding="utf-8")
+    monkeypatch.setenv("ACP_TOKEN", token_env)
+    monkeypatch.setattr(
+        "scripts.install_hook._check_health",
+        lambda _token="": ("WARN", "server unavailable"),
+    )
+    output = []
+
+    assert main(
+        ["--check"],
+        repo_root=repo_root,
+        python_executable=sys.executable,
+        output=output.append,
+    ) == 0
+    assert expected in output
+
+
+def _prepare_check_repo(repo_root: Path) -> None:
+    script_path = repo_root / "hooks" / "copilot_hook.py"
+    script_path.parent.mkdir(parents=True, exist_ok=True)
+    script_path.write_text("print('{}')\n", encoding="utf-8")
+    main([], repo_root=repo_root, python_executable=sys.executable)
+
+
+def test_check_sends_token_and_passes_health_probe(tmp_path, monkeypatch):
+    repo_root = tmp_path / "repo"
+    _prepare_check_repo(repo_root)
+    (repo_root / ".acp-token").write_text("file-secret\n", encoding="utf-8")
+    monkeypatch.delenv("ACP_TOKEN", raising=False)
+    output = []
+
+    class Response:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+    def open_url(request, timeout):
+        assert timeout == 2
+        assert request.get_header("X-acp-token") == "file-secret"
+        return Response()
+
+    monkeypatch.setattr("scripts.install_hook.urllib.request.urlopen", open_url)
+
+    assert main(
+        ["--check"],
+        repo_root=repo_root,
+        python_executable=sys.executable,
+        output=output.append,
+    ) == 0
+    assert "PASS server health endpoint responded" in output
+
+
+@pytest.mark.parametrize(
+    ("token_env", "token_file", "message"),
+    [
+        (
+            "environment-secret",
+            "",
+            "FAIL server rejected the token: it was likely started with a different "
+            "ACP_TOKEN (restart it, clear the ACP_TOKEN env var)",
+        ),
+        (
+            "",
+            "",
+            "FAIL login is enabled but no token found (run python -m scripts.set_token)",
+        ),
+    ],
+)
+def test_check_reports_helpful_message_for_unauthorized_health_probe(
+    tmp_path, monkeypatch, token_env, token_file, message
+):
+    repo_root = tmp_path / "repo"
+    _prepare_check_repo(repo_root)
+    if token_file:
+        (repo_root / ".acp-token").write_text(token_file, encoding="utf-8")
+    monkeypatch.setenv("ACP_TOKEN", token_env)
+    output = []
+
+    def reject_request(request, timeout):
+        if token_env:
+            assert request.get_header("X-acp-token") == token_env
+        else:
+            assert request.get_header("X-acp-token") in ("", None)
+        raise urllib.error.HTTPError(
+            request.full_url, 401, "Unauthorized", None, None
+        )
+
+    monkeypatch.setattr("scripts.install_hook.urllib.request.urlopen", reject_request)
+
+    assert main(
+        ["--check"],
+        repo_root=repo_root,
+        python_executable=sys.executable,
+        output=output.append,
+    ) == 1
+    assert message in output

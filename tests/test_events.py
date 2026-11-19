@@ -9,7 +9,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from server.events import EventBroadcaster
-from server.main import DATABASE_URL, TOKEN, app, dashboard_events
+from server.main import DATABASE_URL, app, dashboard_events
 
 
 def test_broadcaster_fans_out_changed_and_coalesces():
@@ -81,7 +81,6 @@ def _assert_copilot_notification():
                 request = executor.submit(
                     client.post,
                     "/hook/copilot",
-                    headers={"x-acp-token": TOKEN},
                     json={
                         "sessionId": session_id,
                         "toolName": "unknown-test-tool",
@@ -112,7 +111,6 @@ def _assert_copilot_notification():
                 assert approval_row is not None
                 decided = client.post(
                     f"/approvals/{approval_row[0]}/decide",
-                    headers={"x-acp-token": TOKEN},
                     json={"decision": "deny"},
                 )
                 assert decided.status_code == 200

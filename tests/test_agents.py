@@ -10,7 +10,6 @@ from fastapi.testclient import TestClient
 
 from server.main import (
     DATABASE_URL,
-    TOKEN,
     UPSERT_SESSION,
     app,
     compute_agent_state,
@@ -112,7 +111,7 @@ def test_agents_endpoint_with_postgres(monkeypatch):
         asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
     try:
         with TestClient(app) as client:
-            response = client.get("/agents", headers={"x-acp-token": TOKEN})
+            response = client.get("/agents")
     finally:
         if sys.platform == "win32":
             asyncio.set_event_loop_policy(policy)

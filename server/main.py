@@ -8,17 +8,22 @@ Flow for a PermissionRequest hook:
 from __future__ import annotations
 
 import asyncio
+import csv
 import hmac
+import io
 import json
 import logging
 import os
-from collections import Counter
+import secrets
+import threading
+import time
+from collections import Counter, deque
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Literal
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Response
 from fastapi.responses import FileResponse, PlainTextResponse, StreamingResponse
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
@@ -43,13 +48,34 @@ from .policy import (
 from .repo_policy import apply_repo_rules, load_repo_rules
 
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://acp:acp@127.0.0.1:5435/acp")
-TOKEN = os.getenv("ACP_TOKEN", "")
+TOKEN_FILE = Path(__file__).resolve().parent.parent / ".acp-token"
+
+
+def _load_token(token_file: Path | None = None) -> str:
+    environment_token = os.getenv("ACP_TOKEN", "")
+    if environment_token:
+        return environment_token
+    try:
+        with (token_file or TOKEN_FILE).open(encoding="utf-8") as token_stream:
+            return token_stream.readline().strip()
+    except FileNotFoundError:
+        return ""
+
+
 WAIT_SECONDS = float(os.getenv("ACP_WAIT_SECONDS", "45"))  # keep below the hook timeout
 QUESTION_SECONDS = float(os.getenv("ACP_QUESTION_SECONDS", "50"))
 SIM_MIN = float(os.getenv("ACP_SIM_MIN", "0.80"))
 PORT = int(os.getenv("ACP_PORT", "8787"))
 POLL_SECONDS = 0.5
+SESSION_TTL_SECONDS = 12 * 60 * 60
+LOGIN_FAILURE_WINDOW_SECONDS = 60
+LOGIN_FAILURE_LIMIT = 5
 logger = logging.getLogger(__name__)
+_sessions: dict[str, float] = {}
+_login_failures: dict[str, deque[float]] = {}
+_auth_lock = threading.Lock()
+_hook_auth_warning_lock = threading.Lock()
+_last_hook_auth_warning: float | None = None
 
 UPSERT_SESSION = """
 INSERT INTO sessions (id, agent, cwd, model, status) VALUES (%s, %s, %s, %s, %s)
@@ -147,8 +173,72 @@ async def _embed_approval(pool: AsyncConnectionPool, aid: int, text: str) -> Non
         )
 
 
-def require_token(x_acp_token: str = Header(default="")) -> None:
-    if TOKEN and not hmac.compare_digest(x_acp_token, TOKEN):
+def _valid_session(session_id: str | None) -> bool:
+    if not session_id:
+        return False
+    now = time.monotonic()
+    with _auth_lock:
+        expiry = _sessions.get(session_id)
+        if expiry is None:
+            return False
+        if expiry <= now:
+            del _sessions[session_id]
+            return False
+        return True
+
+
+def _has_dashboard_auth(
+    request: Request,
+    configured_token: str | None = None,
+) -> bool:
+    expected_token = _load_token() if configured_token is None else configured_token
+    request_token = request.headers.get("x-acp-token", "")
+    return bool(
+        (expected_token and secrets.compare_digest(request_token, expected_token))
+        or _valid_session(request.cookies.get("acp_session"))
+    )
+
+
+def _is_dashboard_route(path: str) -> bool:
+    return (
+        path in {"/", "/healthz", "/events", "/agents", "/sessions", "/logout"}
+        or path == "/approvals"
+        or path.startswith("/approvals/")
+        or path == "/audit"
+        or path == "/audit.csv"
+        or path.startswith("/audit/")
+    )
+
+
+def _warn_hook_auth_rejection() -> None:
+    global _last_hook_auth_warning
+    now = time.monotonic()
+    with _hook_auth_warning_lock:
+        if (
+            _last_hook_auth_warning is None
+            or now - _last_hook_auth_warning >= 60
+        ):
+            logger.warning("hook request rejected: missing or invalid token")
+            _last_hook_auth_warning = now
+
+
+def require_token(
+    request: Request,
+    x_acp_token: str = Header(default=""),
+) -> None:
+    token = _load_token()
+    if not token or request.url.path in {"/", "/login", "/auth/status"}:
+        return
+    if request.url.path in {"/hook", "/hook/copilot"}:
+        if not hmac.compare_digest(x_acp_token, token):
+            _warn_hook_auth_rejection()
+            raise HTTPException(status_code=401, detail="bad token")
+        return
+    if _is_dashboard_route(request.url.path):
+        if not _has_dashboard_auth(request, token):
+            raise HTTPException(status_code=401, detail="authentication required")
+        return
+    if not hmac.compare_digest(x_acp_token, token):
         raise HTTPException(status_code=401, detail="bad token")
 
 
@@ -168,6 +258,8 @@ async def validate_local_request(request: Request, call_next):
         allowed_origins = {
             f"http://127.0.0.1:{PORT}",
             f"http://localhost:{PORT}",
+            f"https://127.0.0.1:{PORT}",
+            f"https://localhost:{PORT}",
         }
         if origin.lower() not in allowed_origins:
             return PlainTextResponse("Forbidden", status_code=403)
@@ -175,9 +267,77 @@ async def validate_local_request(request: Request, call_next):
     return await call_next(request)
 
 
+class LoginIn(BaseModel):
+    token: str
+
+
+@app.post("/login")
+async def login(body: LoginIn, request: Request):
+    token = _load_token()
+    if not token:
+        raise HTTPException(status_code=404, detail="login is not enabled")
+    client_ip = request.client.host if request.client else "unknown"
+    now = time.monotonic()
+    with _auth_lock:
+        failures = _login_failures.setdefault(client_ip, deque())
+        while failures and now - failures[0] >= LOGIN_FAILURE_WINDOW_SECONDS:
+            failures.popleft()
+        if len(failures) >= LOGIN_FAILURE_LIMIT:
+            raise HTTPException(status_code=429, detail="too many failed login attempts")
+        if not secrets.compare_digest(body.token, token):
+            failures.append(now)
+            raise HTTPException(status_code=401, detail="invalid token")
+        _login_failures.pop(client_ip, None)
+        session_id = secrets.token_urlsafe(32)
+        _sessions[session_id] = now + SESSION_TTL_SECONDS
+
+    response = Response(content='{"ok":true}', media_type="application/json")
+    response.set_cookie(
+        "acp_session",
+        session_id,
+        max_age=SESSION_TTL_SECONDS,
+        path="/",
+        httponly=True,
+        samesite="strict",
+        secure=request.url.scheme == "https",
+    )
+    return response
+
+
+@app.post("/logout")
+async def logout(request: Request):
+    session_id = request.cookies.get("acp_session")
+    if session_id:
+        with _auth_lock:
+            _sessions.pop(session_id, None)
+    response = Response(content='{"ok":true}', media_type="application/json")
+    response.delete_cookie(
+        "acp_session",
+        path="/",
+        httponly=True,
+        samesite="strict",
+        secure=request.url.scheme == "https",
+    )
+    return response
+
+
+@app.get("/auth/status")
+async def auth_status(request: Request):
+    token = _load_token()
+    return {
+        "login_enabled": bool(token),
+        "authenticated": not token or _has_dashboard_auth(request, token),
+    }
+
+
 @app.get("/", include_in_schema=False)
-async def dashboard():
-    return FileResponse(Path(__file__).parent / "static" / "index.html")
+async def dashboard(request: Request):
+    token = _load_token()
+    status_code = 401 if token and not _has_dashboard_auth(request, token) else 200
+    return FileResponse(
+        Path(__file__).parent / "static" / "index.html",
+        status_code=status_code,
+    )
 
 
 @app.get("/events")
@@ -532,6 +692,137 @@ async def list_approvals(request: Request, status: str = "pending", limit: int =
                 )
                 approval["identical_count"] = identity_counts[key] - 1
     return approvals
+
+
+def _audit_sql(
+    since: datetime | None,
+    until: datetime | None,
+    agent: str | None,
+    status: str | None,
+    risk: str | None,
+    decided_by: str | None,
+    q: str | None,
+) -> tuple[str, tuple]:
+    clauses = []
+    params = []
+    for column, value in (
+        ("a.created_at >= %s", since),
+        ("a.created_at <= %s", until),
+        ("s.agent = %s", agent),
+        ("a.status = %s", status),
+        ("a.risk = %s", risk),
+        ("a.decided_by = %s", decided_by),
+    ):
+        if value is not None:
+            clauses.append(column)
+            params.append(value)
+    if q is not None:
+        escaped_q = q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        pattern = f"%{escaped_q}%"
+        clauses.append(
+            "(a.summary ILIKE %s ESCAPE E'\\\\' "
+            "OR COALESCE(a.tool_input->>'command', '') ILIKE %s ESCAPE E'\\\\')"
+        )
+        params.extend((pattern, pattern))
+
+    where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+    sql = (
+        "SELECT a.id, a.created_at, s.agent, a.tool_name, "
+        "COALESCE(NULLIF(a.tool_input->>'command', ''), a.summary) AS command, "
+        "a.summary, a.risk, a.status, a.decided_by, a.reason "
+        "FROM approvals AS a LEFT JOIN sessions AS s ON s.id = a.session_id"
+        f"{where} ORDER BY a.created_at DESC, a.id DESC LIMIT %s OFFSET %s"
+    )
+    return sql, tuple(params)
+
+
+async def _fetch_audit_rows(
+    request: Request,
+    since: datetime | None,
+    until: datetime | None,
+    agent: str | None,
+    status: str | None,
+    risk: str | None,
+    decided_by: str | None,
+    q: str | None,
+    limit: int,
+    offset: int,
+):
+    sql, params = _audit_sql(since, until, agent, status, risk, decided_by, q)
+    async with request.app.state.pool.connection() as conn:
+        cur = await conn.execute(sql, params + (limit + 1, offset))
+        rows = await cur.fetchall()
+    return rows
+
+
+@app.get("/audit")
+async def audit(
+    request: Request,
+    since: datetime | None = None,
+    until: datetime | None = None,
+    agent: str | None = None,
+    status: str | None = None,
+    risk: str | None = None,
+    decided_by: str | None = None,
+    q: str | None = None,
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+):
+    rows = await _fetch_audit_rows(
+        request, since, until, agent, status, risk, decided_by, q, limit, offset
+    )
+    return {
+        "items": rows[:limit],
+        "has_more": len(rows) > limit,
+        "limit": limit,
+        "offset": offset,
+    }
+
+
+def _csv_safe(value) -> str:
+    if value is None:
+        text = ""
+    elif isinstance(value, datetime):
+        text = value.isoformat()
+    else:
+        text = str(value)
+    return f"'{text}" if text.startswith(("=", "+", "-", "@")) else text
+
+
+@app.get("/audit.csv")
+async def audit_csv(
+    request: Request,
+    since: datetime | None = None,
+    until: datetime | None = None,
+    agent: str | None = None,
+    status: str | None = None,
+    risk: str | None = None,
+    decided_by: str | None = None,
+    q: str | None = None,
+    limit: int = Query(5000, ge=1, le=5000),
+    offset: int = Query(0, ge=0),
+):
+    rows = await _fetch_audit_rows(
+        request, since, until, agent, status, risk, decided_by, q, limit, offset
+    )
+    output = io.StringIO(newline="")
+    writer = csv.writer(output)
+    writer.writerow(
+        ("time", "agent", "tool", "command", "risk", "decision", "decided_by", "reason")
+    )
+    for row in rows[:limit]:
+        writer.writerow(
+            _csv_safe(row[key])
+            for key in (
+                "created_at", "agent", "tool_name", "command",
+                "risk", "status", "decided_by", "reason",
+            )
+        )
+    return Response(
+        content=output.getvalue(),
+        media_type="text/csv",
+        headers={"Content-Disposition": 'attachment; filename="audit.csv"'},
+    )
 
 
 @app.get("/approvals/{aid}/similar")

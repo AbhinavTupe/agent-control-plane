@@ -2,6 +2,7 @@ __pycache__/
 *.pyc
 .venv/
 .env
+.acp-token
 .pytest_cache/
 node_modules/
 docs/settings.local.json

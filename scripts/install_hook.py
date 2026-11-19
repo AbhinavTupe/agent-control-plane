@@ -11,6 +11,9 @@ from pathlib import Path
 from typing import Callable
 
 
+TOKEN_FILE = Path(__file__).resolve().parent.parent / ".acp-token"
+
+
 def _quoted_path(path: Path) -> str:
     value = path.resolve().as_posix()
     return f'"{value}"' if " " in value else value
@@ -76,14 +79,52 @@ def _report(output: Callable[[str], None], status: str, message: str) -> None:
     output(f"{status} {message}")
 
 
-def _check_health() -> tuple[str, str]:
-    request = urllib.request.Request("http://127.0.0.1:8787/healthz", method="GET")
+def _token_source(token_file: Path) -> str | None:
+    if os.environ.get("ACP_TOKEN", ""):
+        return "env"
+    try:
+        with token_file.open(encoding="utf-8") as token_stream:
+            if token_stream.readline().strip():
+                return "file"
+    except FileNotFoundError:
+        pass
+    return None
+
+
+def _load_token(token_file: Path | None = None) -> str:
+    environment_token = os.environ.get("ACP_TOKEN", "")
+    if environment_token:
+        return environment_token
+    try:
+        with (token_file or TOKEN_FILE).open(encoding="utf-8") as token_stream:
+            return token_stream.readline().strip()
+    except FileNotFoundError:
+        return ""
+
+
+def _check_health(token: str = "") -> tuple[str, str]:
+    request = urllib.request.Request(
+        "http://127.0.0.1:8787/healthz",
+        method="GET",
+        headers={"X-ACP-Token": token},
+    )
     try:
         with urllib.request.urlopen(request, timeout=2) as response:
             if response.status == 200:
                 return "PASS", "server health endpoint responded"
             return "FAIL", f"server health endpoint returned HTTP {response.status}"
     except urllib.error.HTTPError as error:
+        if error.code == 401 and token:
+            return (
+                "FAIL",
+                "server rejected the token: it was likely started with a different "
+                "ACP_TOKEN (restart it, clear the ACP_TOKEN env var)",
+            )
+        if error.code == 401:
+            return (
+                "FAIL",
+                "login is enabled but no token found (run python -m scripts.set_token)",
+            )
         return "FAIL", f"server health endpoint returned HTTP {error.code}"
     except (urllib.error.URLError, TimeoutError, OSError) as error:
         return "WARN", f"server is unavailable ({error})"
@@ -93,6 +134,7 @@ def check(
     repo_root: Path,
     python_executable: str,
     output: Callable[[str], None] = print,
+    token_file: Path | None = None,
 ) -> int:
     statuses = []
 
@@ -101,6 +143,14 @@ def check(
         _report(output, status, message)
 
     config_path = repo_root / ".github" / "hooks" / "acp.json"
+    token_path = token_file or TOKEN_FILE
+    token = _load_token(token_path)
+    token_source = _token_source(token_path)
+    if token_source:
+        report("PASS", f"token: found ({token_source})")
+    else:
+        report("WARN", "token: missing")
+
     script_path = None
     try:
         script_path = _script_path(config_path, repo_root)
@@ -137,7 +187,7 @@ def check(
         else:
             report("PASS", "hook script prints valid JSON for a harmless sample payload")
 
-    health_status, health_message = _check_health()
+    health_status, health_message = _check_health(token)
     report(health_status, health_message)
     report(
         "PASS",
@@ -165,7 +215,8 @@ def main(
         output(json.dumps(_hook_config(root, python_path), indent=2))
         return 0
     if args.check:
-        return check(root, python_path, output)
+        token_file = (repo_root / ".acp-token") if repo_root is not None else None
+        return check(root, python_path, output, token_file)
     install(root, python_path)
     return 0
 

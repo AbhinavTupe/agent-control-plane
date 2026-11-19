@@ -58,6 +58,19 @@
     .similar-item { display: flex; flex-wrap: wrap; align-items: center; gap: 7px; margin-top: 7px; font-size: .85rem; }
     .similar-summary { flex-basis: 100%; color: #c9d5ea; overflow-wrap: anywhere; }
     .actions { margin-top: 14px; justify-content: flex-start; flex-wrap: wrap; }
+    .tabs, .filters, .pagination { display: flex; flex-wrap: wrap; align-items: end; gap: 10px; }
+    .tabs { margin: 18px 0; border-bottom: 1px solid var(--border); }
+    .tabs button { color: var(--muted); background: transparent; border-radius: 6px 6px 0 0; }
+    .tabs button.active { color: #10141c; background: var(--accent); }
+    .filters { margin-bottom: 14px; }
+    .filters label { display: grid; gap: 4px; color: var(--muted); font-size: .82rem; }
+    .filters input, .filters select { min-width: 130px; background: #111720; border: 1px solid var(--border); border-radius: 6px; color: inherit; padding: 7px 9px; font: inherit; }
+    .filters label:last-of-type { flex: 1; }
+    .audit-command { display: block; max-width: 360px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; }
+    .pagination { justify-content: flex-end; margin-top: 12px; }
+    #login-panel { max-width: 420px; margin: 10vh auto; }
+    #login-panel form { display: flex; gap: 8px; }
+    #login-message { min-height: 1.5em; color: #ff9a9f; }
     .question-card { border-color: #7563a8; background: #1d1b2b; }
     .question-label { color: #c8b8ff; }
     .question-message { margin: 12px 0; white-space: pre-wrap; overflow-wrap: anywhere; }
@@ -97,43 +110,108 @@
           <span class="counts"><span><span id="pending-count" class="count">0</span> pending</span><span><span id="agents-count" class="count">0</span> agents</span></span>
         </div>
         <div id="error" role="status" aria-live="polite"></div>
+        <button id="logout" type="button" hidden>Logout</button>
       </div>
     </header>
 
-    <section aria-labelledby="pending-heading">
-      <h2 id="pending-heading">Pending approvals</h2>
-      <div id="pending-list" class="cards"><p class="empty">Loading approvals…</p></div>
+    <section id="login-panel" class="card" hidden aria-labelledby="login-heading">
+      <h2 id="login-heading">Dashboard login</h2>
+      <p class="muted">Enter the ACP_TOKEN configured on the server.</p>
+      <form id="login-form">
+        <input id="login-token" type="password" autocomplete="current-password" aria-label="ACP_TOKEN" required>
+        <button type="submit">Log in</button>
+      </form>
+      <div id="login-message" role="status" aria-live="polite"></div>
     </section>
 
-    <section aria-labelledby="recent-heading">
-      <h2 id="recent-heading">Recent decisions</h2>
-      <div class="table-wrap">
-        <table>
-          <thead><tr><th>Time</th><th>Summary</th><th>Risk</th><th>Status</th><th>Decided by</th><th>Reason</th></tr></thead>
-          <tbody id="recent-list"><tr><td class="empty" colspan="6">Loading decisions…</td></tr></tbody>
-        </table>
+    <div id="dashboard-panel">
+      <nav class="tabs" aria-label="Dashboard views">
+        <button type="button" class="active" data-tab="inbox">Inbox</button>
+        <button type="button" data-tab="audit">Audit</button>
+      </nav>
+      <div id="inbox-panel">
+        <section aria-labelledby="pending-heading">
+          <h2 id="pending-heading">Pending approvals</h2>
+          <div id="pending-list" class="cards"><p class="empty">Loading approvals…</p></div>
+        </section>
+
+        <section aria-labelledby="recent-heading">
+          <h2 id="recent-heading">Recent decisions</h2>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>Time</th><th>Summary</th><th>Risk</th><th>Status</th><th>Decided by</th><th>Reason</th></tr></thead>
+              <tbody id="recent-list"><tr><td class="empty" colspan="6">Loading decisions…</td></tr></tbody>
+            </table>
+          </div>
+        </section>
+
+        <section aria-labelledby="agents-heading">
+          <h2 id="agents-heading">Agents</h2>
+          <div id="agents-list" class="cards"><p class="empty">Loading agents…</p></div>
+        </section>
       </div>
-    </section>
-
-    <section aria-labelledby="agents-heading">
-      <h2 id="agents-heading">Agents</h2>
-      <div id="agents-list" class="cards"><p class="empty">Loading agents…</p></div>
-    </section>
+      <section id="audit-panel" hidden aria-labelledby="audit-heading">
+        <h2 id="audit-heading">Approval audit</h2>
+        <form id="audit-filters" class="filters">
+          <label>Since<input name="since" type="datetime-local"></label>
+          <label>Until<input name="until" type="datetime-local"></label>
+          <label>Agent<input name="agent" type="text" placeholder="Any agent"></label>
+          <label>Status
+            <select name="status">
+              <option value="">All</option><option>pending</option><option>allowed</option><option>denied</option><option>expired</option>
+            </select>
+          </label>
+          <label>Risk
+            <select name="risk">
+              <option value="">All</option><option>low</option><option>medium</option><option>high</option>
+            </select>
+          </label>
+          <label>Decided by
+            <select name="decided_by">
+              <option value="">All</option><option>human</option><option>policy</option><option>timeout</option><option>client_gone</option><option>seed</option>
+            </select>
+          </label>
+          <label>Command or summary<input name="q" type="search" placeholder="Contains…"></label>
+          <button type="submit">Filter</button>
+          <button id="export-audit" type="button">Export CSV</button>
+        </form>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Time</th><th>Agent</th><th>Tool</th><th>Command</th><th>Risk</th><th>Decision</th><th>Decided by</th><th>Reason</th></tr></thead>
+            <tbody id="audit-list"><tr><td class="empty" colspan="8">Choose filters or wait for audit data…</td></tr></tbody>
+          </table>
+        </div>
+        <div class="pagination">
+          <span id="audit-page" class="muted"></span>
+          <button id="audit-prev" type="button">Previous</button>
+          <button id="audit-next" type="button">Next</button>
+        </div>
+      </section>
+    </div>
   </main>
   <script>
     const pendingList = document.getElementById("pending-list");
     const recentList = document.getElementById("recent-list");
     const agentsList = document.getElementById("agents-list");
+    const auditList = document.getElementById("audit-list");
     const errorLine = document.getElementById("error");
+    const loginPanel = document.getElementById("login-panel");
+    const dashboardPanel = document.getElementById("dashboard-panel");
     const similarRequests = new Map();
     let pendingApprovalIds = new Set();
+    let auditOffset = 0;
+    let auditHasMore = false;
+    let auditLoaded = false;
+    let activeTab = "inbox";
     let polling = false;
+    let authStatus = null;
     let refreshQueued = false;
     let agentsRefreshQueued = false;
     let lastAgentsFetchAt = 0;
     let cachedAgents = null;
     let refreshDebounce;
     let eventStreamConnected = false;
+    let events;
     let pollTimer;
 
     function text(value) {
@@ -160,6 +238,26 @@
       if (!value) return "—";
       const date = new Date(value);
       return Number.isNaN(date.getTime()) ? text(value) : date.toLocaleString();
+    }
+
+    function showLogin(enabled) {
+      loginPanel.hidden = !enabled;
+      dashboardPanel.hidden = enabled;
+      document.getElementById("logout").hidden = true;
+      document.getElementById("health").textContent = enabled ? "Login required" : "Server online";
+      if (events) {
+        events.close();
+        events = null;
+        eventStreamConnected = false;
+        updatePollingInterval();
+      }
+    }
+
+    function showDashboard(loginEnabled) {
+      loginPanel.hidden = true;
+      dashboardPanel.hidden = false;
+      document.getElementById("logout").hidden = !loginEnabled;
+      startEventStream();
     }
 
     function renderPending(items) {
@@ -504,8 +602,84 @@
 
     async function getJson(url) {
       const response = await fetch(url);
-      if (!response.ok) throw new Error("Request failed: " + response.status);
+      if (!response.ok) {
+        const error = new Error("Request failed: " + response.status);
+        error.status = response.status;
+        throw error;
+      }
       return response.json();
+    }
+
+    async function checkAuth() {
+      authStatus = await getJson("/auth/status");
+      return authStatus;
+    }
+
+    async function handleUnauthorized() {
+      const auth = await checkAuth();
+      if (!auth.authenticated) showLogin(auth.login_enabled);
+      return !auth.authenticated;
+    }
+
+    function auditQuery(limit, offset) {
+      const params = new URLSearchParams();
+      const form = document.getElementById("audit-filters");
+      for (const [key, value] of new FormData(form).entries()) {
+        if (!value) continue;
+        if (key === "since" || key === "until") {
+          params.set(key, new Date(value).toISOString());
+        } else {
+          params.set(key, value);
+        }
+      }
+      params.set("limit", String(limit));
+      params.set("offset", String(offset));
+      return params;
+    }
+
+    async function loadAudit() {
+      try {
+        const result = await getJson("/audit?" + auditQuery(50, auditOffset));
+        auditLoaded = true;
+        auditHasMore = result.has_more;
+        auditList.replaceChildren();
+        if (!result.items.length) {
+          const row = auditList.insertRow();
+          cell(row, "No audit entries found", "empty").colSpan = 8;
+        }
+        for (const item of result.items) {
+          const row = auditList.insertRow();
+          cell(row, formatTime(item.created_at));
+          cell(row, item.agent);
+          cell(row, item.tool_name);
+          const command = cell(row, item.command, "summary-cell");
+          command.classList.add("audit-command");
+          command.title = text(item.command);
+          const risk = row.insertCell();
+          risk.appendChild(badge(item.risk));
+          cell(row, item.status);
+          cell(row, item.decided_by);
+          cell(row, item.reason);
+        }
+        const previous = document.getElementById("audit-prev");
+        const next = document.getElementById("audit-next");
+        previous.disabled = auditOffset === 0;
+        next.disabled = !auditHasMore;
+        document.getElementById("audit-page").textContent =
+          result.items.length
+            ? "Showing " + (auditOffset + 1) + "–" + (auditOffset + result.items.length)
+            : "No results";
+      } catch (error) {
+        if (error.status === 401) {
+          try {
+            if (await handleUnauthorized()) return;
+          } catch (authError) {
+            errorLine.textContent = text(authError.message || authError);
+            return;
+          }
+        }
+        errorLine.textContent = text(error.message || error);
+      }
     }
 
     async function decide(id, decision, reason, actions, applyToIdentical = false) {
@@ -523,6 +697,14 @@
         if (response.status !== 409 && !response.ok) throw new Error("Decision failed: " + response.status);
         await refresh();
       } catch (error) {
+        if (error.status === 401) {
+          try {
+            if (await handleUnauthorized()) return;
+          } catch (authError) {
+            errorLine.textContent = text(authError.message || authError);
+            return;
+          }
+        }
         errorLine.textContent = text(error.message || error);
         actions.querySelectorAll("button").forEach(button => { button.disabled = false; });
       }
@@ -540,6 +722,14 @@
         if (response.status !== 409 && !response.ok) throw new Error("Answer submission failed: " + response.status);
         await refresh();
       } catch (error) {
+        if (error.status === 401) {
+          try {
+            if (await handleUnauthorized()) return;
+          } catch (authError) {
+            errorLine.textContent = text(authError.message || authError);
+            return;
+          }
+        }
         errorLine.textContent = text(error.message || error);
         actions.querySelectorAll("button").forEach(button => { button.disabled = false; });
       }
@@ -552,8 +742,13 @@
         return;
       }
       polling = true;
-      // This dashboard deliberately does not send ACP_TOKEN; deployments configured with it require authentication outside this page.
       try {
+        const auth = authStatus || await checkAuth();
+        if (!auth.authenticated) {
+          showLogin(auth.login_enabled);
+          return;
+        }
+        showDashboard(auth.login_enabled);
         const results = await Promise.allSettled([
           fetch("/healthz"),
           getJson("/approvals?status=pending"),
@@ -575,7 +770,19 @@
         if (results[3].status === "fulfilled" && results[3].value) renderAgents(results[3].value);
 
         const failures = results.slice(1).filter(result => result.status === "rejected");
+        const unauthorized = results.some(result =>
+          (result.status === "rejected" && result.reason && result.reason.status === 401)
+          || (result.status === "fulfilled" && result.value.status === 401)
+        );
+        if (unauthorized) {
+          const currentAuth = await checkAuth();
+          if (!currentAuth.authenticated) {
+            showLogin(currentAuth.login_enabled);
+            return;
+          }
+        }
         errorLine.textContent = failures.length ? "Some dashboard data could not be refreshed." : "";
+        if (activeTab === "audit") void loadAudit();
       } catch (error) {
         errorLine.textContent = text(error.message || error);
       } finally {
@@ -589,24 +796,95 @@
       }
     }
 
+    document.getElementById("login-form").addEventListener("submit", async event => {
+      event.preventDefault();
+      const message = document.getElementById("login-message");
+      const input = document.getElementById("login-token");
+      message.textContent = "";
+      try {
+        const response = await fetch("/login", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ token: input.value })
+        });
+        if (!response.ok) throw new Error(response.status === 429
+          ? "Too many attempts. Wait a minute and try again."
+          : "Login failed. Check the token and try again.");
+        input.value = "";
+        const auth = await checkAuth();
+        if (auth.authenticated) await refresh();
+        else showLogin(auth.login_enabled);
+      } catch (error) {
+        message.textContent = text(error.message || error);
+      }
+    });
+
+    document.getElementById("logout").addEventListener("click", async () => {
+      const response = await fetch("/logout", { method: "POST" });
+      if (!response.ok) {
+        errorLine.textContent = "Logout failed: " + response.status;
+        return;
+      }
+      try {
+        const auth = await checkAuth();
+        if (!auth.authenticated) showLogin(auth.login_enabled);
+        else await refresh();
+      } catch (error) {
+        errorLine.textContent = text(error.message || error);
+      }
+    });
+
+    document.querySelectorAll("[data-tab]").forEach(button => {
+      button.addEventListener("click", () => {
+        activeTab = button.dataset.tab;
+        document.querySelectorAll("[data-tab]").forEach(tab => {
+          tab.classList.toggle("active", tab === button);
+        });
+        document.getElementById("inbox-panel").hidden = activeTab !== "inbox";
+        document.getElementById("audit-panel").hidden = activeTab !== "audit";
+        if (activeTab === "audit" && !auditLoaded) void loadAudit();
+      });
+    });
+
+    document.getElementById("audit-filters").addEventListener("submit", event => {
+      event.preventDefault();
+      auditOffset = 0;
+      void loadAudit();
+    });
+    document.getElementById("audit-prev").addEventListener("click", () => {
+      auditOffset = Math.max(0, auditOffset - 50);
+      void loadAudit();
+    });
+    document.getElementById("audit-next").addEventListener("click", () => {
+      if (!auditHasMore) return;
+      auditOffset += 50;
+      void loadAudit();
+    });
+    document.getElementById("export-audit").addEventListener("click", () => {
+      window.location.href = "/audit.csv?" + auditQuery(5000, 0);
+    });
+
     function updatePollingInterval() {
       if (pollTimer) window.clearInterval(pollTimer);
       pollTimer = window.setInterval(refresh, eventStreamConnected ? 15000 : 3000);
     }
 
-    const events = new EventSource("/events");
-    events.onopen = () => {
-      eventStreamConnected = true;
-      updatePollingInterval();
-    };
-    events.addEventListener("changed", () => {
-      window.clearTimeout(refreshDebounce);
-      refreshDebounce = window.setTimeout(() => void refresh(true), 200);
-    });
-    events.onerror = () => {
-      eventStreamConnected = false;
-      updatePollingInterval();
-    };
+    function startEventStream() {
+      if (events) return;
+      events = new EventSource("/events");
+      events.onopen = () => {
+        eventStreamConnected = true;
+        updatePollingInterval();
+      };
+      events.addEventListener("changed", () => {
+        window.clearTimeout(refreshDebounce);
+        refreshDebounce = window.setTimeout(() => void refresh(true), 200);
+      });
+      events.onerror = () => {
+        eventStreamConnected = false;
+        updatePollingInterval();
+      };
+    }
 
     refresh();
     updatePollingInterval();

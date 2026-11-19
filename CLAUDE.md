@@ -14,6 +14,7 @@ Timeout (45s) or client disconnect → server returns `{}` → Claude Code shows
 ## Rules (non-negotiable)
 - Fail-safe: anything unclear or any error = ask a human. NEVER auto-allow on failure.
 - Server binds 127.0.0.1 only. Optional shared secret via `ACP_TOKEN`.
+- With `ACP_TOKEN` set, dashboard login uses an in-memory 12-hour HttpOnly session cookie; hook endpoints still require the existing token header.
 - Parameterized SQL only. No string-formatted queries.
 - `server/policy.py` stays pure (no I/O) and fully unit-tested. Every new rule needs a test.
 - No new dependencies without asking. Small diffs. Run `pytest -q` before saying done.
@@ -28,7 +29,7 @@ benchmark/: never tune policy on the test split; benchmark/results/test-final.* 
 - Batch approve or deny identical pending requests (same command and repo), never `ask_user` requests.
 - Similar-decision hints show real human decisions first; synthetic seeds are badged "example".
 - Evaluation: 112 cases and 0 unsafe auto-allows. This is a regression suite, not an independent benchmark.
-- Automated tests: 268 passing.
+- Automated tests: 715 passing.
 
 ## Commands
 ```
