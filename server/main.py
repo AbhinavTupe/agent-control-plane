@@ -31,6 +31,7 @@ from psycopg_pool import AsyncConnectionPool
 from pydantic import BaseModel, Field
 
 from .embed import embed, to_pgvector
+from .adapters import ADAPTERS, fail_safe as adapter_fail_safe
 from .events import EventBroadcaster, listen_for_events, notify_changed
 from .notify import (
     DecisionNotification,
@@ -38,7 +39,10 @@ from .notify import (
     schedule_human_decision,
 )
 from .policy import (
+    Verdict,
     classify,
+    classify_bash,
+    classify_powershell,
     question_answer_reply,
     question_declined_reply,
     parse_question_fields,
@@ -255,7 +259,10 @@ def require_token(
     token = _load_token()
     if not token or request.url.path in {"/", "/login", "/auth/status"}:
         return
-    if request.url.path in {"/hook", "/hook/copilot"}:
+    if request.url.path in {
+        "/hook", "/hook/copilot", "/hook/codex", "/hook/cursor",
+        "/hook/antigravity",
+    }:
         if not hmac.compare_digest(x_acp_token, token):
             _warn_hook_auth_rejection()
             raise HTTPException(status_code=401, detail="bad token")
@@ -475,6 +482,86 @@ async def copilot_hook(request: Request):
     )
 
 
+@app.post("/hook/codex")
+@app.post("/hook/cursor")
+@app.post("/hook/antigravity")
+async def adapter_hook(request: Request):
+    agent = request.url.path.rsplit("/", 1)[-1]
+    adapter = ADAPTERS[agent]
+    try:
+        payload = json.loads(
+            await request.body(),
+            parse_constant=_reject_json_constant,
+        )
+    except Exception:
+        logger.warning("invalid %s hook JSON payload", agent)
+        if agent == "cursor":
+            # UNVERIFIED: Cursor documents exit 2 as deny; the message text is
+            # not specified for malformed hook input.
+            return ADAPTERS[agent].render("deny", "Invalid hook payload")
+        return _adapter_fail_safe_response(agent)
+
+    call = adapter.parse(payload)
+    if call is None:
+        logger.warning("malformed or unsupported %s hook payload", agent)
+        return _adapter_fail_safe_response(agent)
+
+    pool = request.app.state.pool
+    event_kind = (
+        payload.get("hook_event_name")
+        if isinstance(payload, dict) and isinstance(payload.get("hook_event_name"), str)
+        else "PreToolUse"
+    )
+    async with pool.connection() as conn:
+        await conn.execute(
+            UPSERT_SESSION,
+            (call.session_id, call.agent, call.cwd, None, "waiting"),
+        )
+        await conn.execute(
+            "INSERT INTO events (session_id, kind, tool_name, payload) VALUES (%s, %s, %s, %s)",
+            (call.session_id, event_kind, "Bash", Jsonb(payload)),
+        )
+
+    _schedule_notification(request.app)
+    normalized = {
+        "tool_name": "Bash",
+        "tool_input": {"command": call.command},
+        "cwd": call.cwd,
+    }
+    result = await _permission(
+        request,
+        normalized,
+        call.session_id,
+        response=adapter.render,
+        classification_tool="UnknownShell",
+        repo_cwd=call.cwd,
+        agent=call.agent,
+    )
+    if result == {}:
+        return _adapter_fail_safe_response(agent)
+    if result is None:
+        return Response(content="")
+    return result
+
+
+def _adapter_fail_safe_response(agent: str) -> Response | dict:
+    response = adapter_fail_safe(agent)
+    return Response(content="") if response is None else response
+
+
+def _reject_json_constant(value: str):
+    raise ValueError(f"invalid JSON constant: {value}")
+
+
+def _classify_unknown_shell(command: str) -> Verdict:
+    bash_verdict = classify_bash(command)
+    powershell_verdict = classify_powershell(command)
+    action_rank = {"allow": 0, "ask": 1, "deny": 2}
+    if action_rank[powershell_verdict.action] > action_rank[bash_verdict.action]:
+        return powershell_verdict
+    return bash_verdict
+
+
 def copilot_perm_response(behavior: str, message: str | None = None) -> dict:
     if behavior == "allow":
         return {"permissionDecision": "allow"}
@@ -511,19 +598,22 @@ async def _permission(
     request: Request,
     p: dict,
     sid: str,
-    response: Callable[[str, str | None], dict] = perm_response,
+    response: Callable[[str, str | None], dict | None] = perm_response,
     classification_tool: str | None = None,
     repo_cwd: str | None = None,
     agent: str = "unknown",
-) -> dict:
+) -> dict | None:
     pool = request.app.state.pool
     tool = p.get("tool_name") or ""
     tin = p.get("tool_input") or {}
-    verdict = classify(classification_tool or tool, tin)
+    if classification_tool == "UnknownShell":
+        verdict = _classify_unknown_shell(str(tin.get("command", "")))
+    else:
+        verdict = classify(classification_tool or tool, tin)
     if tool != "ask_user":
         try:
             rules = load_repo_rules(repo_cwd if repo_cwd is not None else p.get("cwd"))
-            if classification_tool in {"Bash", "PowerShell"} or tool in {"Bash", "PowerShell"}:
+            if classification_tool in {"Bash", "PowerShell", "UnknownShell"} or tool in {"Bash", "PowerShell"}:
                 policy_text = str(tin.get("command", ""))
             else:
                 policy_text = summarize(tool, tin)
@@ -564,7 +654,7 @@ async def _permission(
 
     if initial == "allowed":
         await _set_active(request.app, sid)
-        return response("allow")
+        return response("allow", None)
     if initial == "denied":
         await _set_active(request.app, sid)
         return response("deny", f"Blocked by policy: {verdict.reason}")
@@ -591,7 +681,7 @@ async def _permission(
     if row["status"] == "allowed":
         if tool == "ask_user":
             return response("deny", question_answer_reply(row["reason"]))
-        return response("allow")
+        return response("allow", None)
     if tool == "ask_user":
         return response("deny", question_declined_reply())
     return response("deny", row["reason"] or "Denied by user")

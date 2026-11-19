@@ -137,6 +137,30 @@ Notifications are off by default. Set `ACP_NOTIFY_DESKTOP=1` for Windows desktop
 2. Open the repo root (the folder that directly contains `.github`) as the VS Code workspace.
 3. Use Copilot Chat normally. Requests routed to a person appear in the dashboard inbox.
 
+### Connect Codex, Cursor, or Antigravity
+
+Install one adapter, or all adapters, from the project root:
+
+```powershell
+python -m scripts.install_hook --agent codex
+python -m scripts.install_hook --agent cursor
+python -m scripts.install_hook --agent antigravity
+python -m scripts.install_hook --agent all
+```
+
+`--scope project` is the default. Use `--scope user` for Codex (`~/.codex/hooks.json`),
+Cursor (`~/.cursor/hooks.json`), or Antigravity (`~/.gemini/config/hooks.json`).
+Copilot supports project scope only. `--print` previews configuration and `--check`
+validates the selected agent's hook and server connection. Existing configuration
+entries are preserved; modified files are backed up as `*.bak`.
+
+All adapters use the same policy and human-approval inbox as Copilot. Unknown shell
+types are checked against both Bash and PowerShell rules, taking the stricter result.
+Codex cannot express an allow or ask response through this adapter, so those cases
+produce no hook output; its native permission flow remains available. Cursor and
+Antigravity fall back to asking when the server is unreachable or a human decision
+times out.
+
 ### Troubleshooting
 
 Hooks load only if the VS Code workspace is the repo root (the folder that directly contains `.github`).
@@ -171,7 +195,7 @@ Hooks load only if the VS Code workspace is the repo root (the folder that direc
 | Tool names | Observed Copilot tools include `apply_patch`, `ask_user`, `bash`, `powershell`, `rg`, `view`, `skill`, `stop_powershell`, `tool_search_tool`, and Pylance tools. |
 | Similar-decision cards | Precedents appear on a pending card (verified live, incl. retry while the embedding is computed); synthetic seeds are badged "example". |
 | Policy evaluation | 112-case regression suite; 0 unsafe auto-allows (not an independent benchmark; see docs/eval.md). |
-| Automated tests | `.venv\Scripts\python.exe -m pytest -q`: 715 passed. |
+| Automated tests | `.venv\Scripts\python.exe -m pytest -q`: 766 passed. |
 
 ## Limitations / Roadmap
 

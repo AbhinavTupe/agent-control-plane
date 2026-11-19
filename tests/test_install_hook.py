@@ -82,9 +82,46 @@ def test_print_does_not_write(tmp_path, capsys):
         python_executable=sys.executable,
     ) == 0
 
-    printed = json.loads(capsys.readouterr().out)
+    lines = capsys.readouterr().out.splitlines()
+    assert lines[0] == f"Target: {repo_root / '.github' / 'hooks' / 'acp.json'}"
+    printed = json.loads("\n".join(lines[1:]))
     assert printed["version"] == 1
     assert not (repo_root / ".github").exists()
+
+
+@pytest.mark.parametrize(
+    ("agent", "scope", "relative_path"),
+    [
+        ("antigravity", "user", (".gemini", "config", "hooks.json")),
+        ("cursor", "user", (".cursor", "hooks.json")),
+        ("codex", "user", (".codex", "hooks.json")),
+        ("copilot", "project", (".github", "hooks", "acp.json")),
+        ("antigravity", "project", (".agents", "hooks.json")),
+        ("cursor", "project", (".cursor", "hooks.json")),
+        ("codex", "project", (".codex", "hooks.json")),
+    ],
+)
+def test_print_reports_target_before_config(
+    monkeypatch, tmp_path, capsys, agent, scope, relative_path
+):
+    home = tmp_path / "home"
+    monkeypatch.setattr(Path, "home", lambda: home)
+    repo_root = tmp_path / "repo"
+
+    assert main(
+        ["--agent", agent, "--scope", scope, "--print"],
+        repo_root=repo_root,
+        python_executable=sys.executable,
+    ) == 0
+
+    lines = capsys.readouterr().out.splitlines()
+    expected_target = (
+        home.joinpath(*relative_path)
+        if scope == "user"
+        else repo_root.joinpath(*relative_path)
+    )
+    assert lines[0] == f"Target: {expected_target}"
+    assert isinstance(json.loads("\n".join(lines[1:])), dict)
 
 
 def test_check_fails_when_hook_script_is_missing(tmp_path, monkeypatch):
@@ -255,3 +292,187 @@ def test_check_reports_helpful_message_for_unauthorized_health_probe(
         output=output.append,
     ) == 1
     assert message in output
+
+
+@pytest.mark.parametrize(
+    ("agent", "relative_path"),
+    [
+        ("cursor", (".cursor", "hooks.json")),
+        ("antigravity", (".agents", "hooks.json")),
+        ("codex", (".codex", "hooks.json")),
+    ],
+)
+def test_install_agent_writes_documented_project_config(
+    tmp_path, agent, relative_path
+):
+    repo_root = tmp_path / "repo"
+    script_name = f"{agent}_hook.py"
+    (repo_root / "hooks").mkdir(parents=True)
+    (repo_root / "hooks" / script_name).write_text("", encoding="utf-8")
+
+    assert main(
+        ["--agent", agent],
+        repo_root=repo_root,
+        python_executable=sys.executable,
+    ) == 0
+
+    config = json.loads(repo_root.joinpath(*relative_path).read_text(encoding="utf-8"))
+    if agent == "cursor":
+        entry = config["hooks"]["beforeShellExecution"][0]
+        assert config["version"] == 1
+        assert entry["timeout"] > 45
+        assert entry["failClosed"] is True
+        assert entry["command"].endswith(script_name)
+    elif agent == "antigravity":
+        entry = config["acp"]["PreToolUse"][0]
+        assert entry["matcher"] == "run_command"
+        assert entry["hooks"][0]["timeout"] > 45
+        assert entry["hooks"][0]["command"].endswith(script_name)
+    else:
+        entry = config["hooks"]["PreToolUse"][0]
+        assert entry["matcher"] == "Bash"
+        assert entry["hooks"][0]["command"].endswith(script_name)
+
+
+def test_install_all_agents_keeps_copilot_default_and_adds_adapters(tmp_path):
+    repo_root = tmp_path / "repo"
+    (repo_root / "hooks").mkdir(parents=True)
+    for script_name in (
+        "copilot_hook.py",
+        "codex_hook.py",
+        "cursor_hook.py",
+        "antigravity_hook.py",
+    ):
+        (repo_root / "hooks" / script_name).write_text("", encoding="utf-8")
+
+    assert main(
+        ["--agent", "all"],
+        repo_root=repo_root,
+        python_executable=sys.executable,
+    ) == 0
+
+    assert _config_path(repo_root).is_file()
+    assert (repo_root / ".codex" / "hooks.json").is_file()
+    assert (repo_root / ".cursor" / "hooks.json").is_file()
+    assert (repo_root / ".agents" / "hooks.json").is_file()
+
+
+@pytest.mark.parametrize(
+    ("agent", "relative_path", "initial"),
+    [
+        (
+            "cursor",
+            (".cursor", "hooks.json"),
+            {"version": 1, "hooks": {"beforeShellExecution": [{"command": "other"}], "keep": []}},
+        ),
+        (
+            "antigravity",
+            (".agents", "hooks.json"),
+            {"other": True, "acp": {"PreToolUse": [{"matcher": "other", "hooks": []}]}},
+        ),
+        (
+            "codex",
+            (".codex", "hooks.json"),
+            {"other": True, "hooks": {"PreToolUse": [{"matcher": "Read", "hooks": []}]}},
+        ),
+    ],
+)
+def test_install_agent_merges_existing_config_and_is_idempotent(
+    tmp_path, agent, relative_path, initial
+):
+    repo_root = tmp_path / "repo"
+    config_path = repo_root.joinpath(*relative_path)
+    config_path.parent.mkdir(parents=True)
+    original = json.dumps(initial).encode()
+    config_path.write_bytes(original)
+    (repo_root / "hooks").mkdir(parents=True)
+    (repo_root / "hooks" / f"{agent}_hook.py").write_text("", encoding="utf-8")
+
+    assert main(
+        ["--agent", agent],
+        repo_root=repo_root,
+        python_executable=sys.executable,
+    ) == 0
+    installed = json.loads(config_path.read_text(encoding="utf-8"))
+    installed_bytes = config_path.read_bytes()
+    installed_stat = config_path.stat().st_mtime_ns
+    assert config_path.with_name("hooks.json.bak").read_bytes() == original
+    assert main(
+        ["--agent", agent],
+        repo_root=repo_root,
+        python_executable=sys.executable,
+    ) == 0
+    assert config_path.read_bytes() == installed_bytes
+    assert config_path.stat().st_mtime_ns == installed_stat
+    assert json.loads(config_path.read_text(encoding="utf-8")) == installed
+    assert installed.get("other") is True if agent != "cursor" else "keep" in installed["hooks"]
+    if agent == "antigravity":
+        assert any(
+            item.get("matcher") == "other"
+            for item in installed["acp"]["PreToolUse"]
+        )
+    if agent == "codex":
+        assert any(
+            item.get("matcher") == "Read"
+            for item in installed["hooks"]["PreToolUse"]
+        )
+
+
+@pytest.mark.parametrize(
+    ("agent", "relative_path"),
+    [
+        ("cursor", (".cursor", "hooks.json")),
+        ("antigravity", (".gemini", "config", "hooks.json")),
+        ("codex", (".codex", "hooks.json")),
+    ],
+)
+def test_install_agent_supports_documented_user_scope(
+    monkeypatch, tmp_path, agent, relative_path
+):
+    home = tmp_path / "home"
+    monkeypatch.setattr(Path, "home", lambda: home)
+    repo_root = tmp_path / "repo"
+    (repo_root / "hooks").mkdir(parents=True)
+    (repo_root / "hooks" / f"{agent}_hook.py").write_text("", encoding="utf-8")
+
+    assert main(
+        ["--agent", agent, "--scope", "user"],
+        repo_root=repo_root,
+        python_executable=sys.executable,
+    ) == 0
+    assert home.joinpath(*relative_path).is_file()
+    assert not repo_root.joinpath(*relative_path).exists()
+
+
+def test_user_scope_rejects_copilot_without_writing(tmp_path, capsys):
+    repo_root = tmp_path / "repo"
+
+    assert main(
+        ["--scope", "user"],
+        repo_root=repo_root,
+        python_executable=sys.executable,
+    ) == 1
+    assert "Copilot does not support --scope user" in capsys.readouterr().out
+    assert not repo_root.exists()
+
+
+def test_check_agent_validates_config_and_hook_output(tmp_path, monkeypatch):
+    repo_root = tmp_path / "repo"
+    script = repo_root / "hooks" / "codex_hook.py"
+    script.parent.mkdir(parents=True)
+    script.write_text("print('{}')\n", encoding="utf-8")
+    main(["--agent", "codex"], repo_root=repo_root, python_executable=sys.executable)
+    monkeypatch.setattr(
+        "scripts.install_hook._check_health",
+        lambda _token="": ("WARN", "server is unavailable"),
+    )
+    output = []
+
+    assert main(
+        ["--agent", "codex", "--check"],
+        repo_root=repo_root,
+        python_executable=sys.executable,
+        output=output.append,
+    ) == 0
+    assert "PASS hooks.json is valid JSON and the hook script exists" in output
+    assert "PASS hook script produced a valid sample response" in output

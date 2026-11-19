@@ -1,21 +1,18 @@
-import os
 import sys
 import urllib.request
 from pathlib import Path
+
+if __package__:
+    from .client import load_token
+else:
+    from client import load_token
 
 
 TOKEN_FILE = Path(__file__).resolve().parent.parent / ".acp-token"
 
 
 def _load_token(token_file: Path | None = None) -> str:
-    environment_token = os.environ.get("ACP_TOKEN", "")
-    if environment_token:
-        return environment_token
-    try:
-        with (token_file or TOKEN_FILE).open(encoding="utf-8") as token_stream:
-            return token_stream.readline().strip()
-    except FileNotFoundError:
-        return ""
+    return load_token(token_file or TOKEN_FILE)
 
 
 def main() -> int:

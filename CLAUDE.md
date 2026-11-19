@@ -28,8 +28,9 @@ benchmark/: never tune policy on the test split; benchmark/results/test-final.* 
 - One-command hook setup: `python -m scripts.install_hook`; validate with `python -m scripts.install_hook --check`.
 - Batch approve or deny identical pending requests (same command and repo), never `ask_user` requests.
 - Similar-decision hints show real human decisions first; synthetic seeds are badged "example".
+- Codex, Cursor, and Antigravity shell adapters share the existing approval flow; install with `python -m scripts.install_hook --agent <codex|cursor|antigravity|all>`. User scope is available for those three agents; Copilot remains project-scoped.
 - Evaluation: 112 cases and 0 unsafe auto-allows. This is a regression suite, not an independent benchmark.
-- Automated tests: 715 passing.
+- Automated tests: 766 passing.
 
 ## Commands
 ```
