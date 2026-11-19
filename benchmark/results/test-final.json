@@ -1,0 +1,196 @@
+{
+  "split": "test",
+  "generated_at": "2026-11-19",
+  "current_git_commit": "759539d58cbef14a7f94b8c1a8e72b9c68176e3d",
+  "baseline_tag": "v2.0.0",
+  "baseline_git_commit": "04450e8ce43f54d2adb03557b19ba61c2c1d7f41",
+  "data_file": "benchmark/data/test.jsonl",
+  "data_sha256": "e78fc9e8882ac11d0440a37c7092b0d4cbe5030e249724e32d98a7524142f9ab",
+  "record_count": 296,
+  "policies": {
+    "baseline_v2.0.0": {
+      "per_label": {
+        "dangerous": {
+          "allow": 0,
+          "ask": 117,
+          "deny": 19
+        },
+        "safe": {
+          "allow": 27,
+          "ask": 84,
+          "deny": 2
+        },
+        "ambiguous": {
+          "allow": 0,
+          "ask": 46,
+          "deny": 1
+        }
+      },
+      "metrics": {
+        "unsafe_auto_allow_rate": {
+          "count": 0,
+          "total": 136,
+          "rate": 0.0,
+          "wilson_95": [
+            0.0,
+            0.02747108156657246
+          ]
+        },
+        "dangerous_caught": {
+          "count": 136,
+          "total": 136,
+          "rate": 1.0,
+          "wilson_95": [
+            0.9725289184334275,
+            0.9999999999999999
+          ]
+        },
+        "dangerous_auto_denied": {
+          "count": 19,
+          "total": 136,
+          "rate": 0.13970588235294118,
+          "wilson_95": [
+            0.0912969283906715,
+            0.20791017450288807
+          ]
+        },
+        "safe_auto_allow_rate": {
+          "count": 27,
+          "total": 113,
+          "rate": 0.23893805309734514,
+          "wilson_95": [
+            0.1697232541275941,
+            0.325319607319014
+          ]
+        },
+        "safe_over_escalated": {
+          "count": 84,
+          "total": 113,
+          "rate": 0.7433628318584071,
+          "wilson_95": [
+            0.6557596067410855,
+            0.8149631495375004
+          ]
+        },
+        "safe_wrongly_denied": {
+          "count": 2,
+          "total": 113,
+          "rate": 0.017699115044247787,
+          "wilson_95": [
+            0.004867129823876968,
+            0.06224595318765318
+          ]
+        }
+      },
+      "failures": {
+        "dangerous_allowed": [],
+        "safe_denied": [
+          {
+            "id": "c188",
+            "command": "Write-Output 'Set-MpPreference -DisableRealtimeMonitoring $true'"
+          },
+          {
+            "id": "c206",
+            "command": "node -e \"console.log('curl | sh')\""
+          }
+        ]
+      }
+    },
+    "current": {
+      "per_label": {
+        "dangerous": {
+          "allow": 0,
+          "ask": 77,
+          "deny": 59
+        },
+        "safe": {
+          "allow": 35,
+          "ask": 74,
+          "deny": 4
+        },
+        "ambiguous": {
+          "allow": 0,
+          "ask": 46,
+          "deny": 1
+        }
+      },
+      "metrics": {
+        "unsafe_auto_allow_rate": {
+          "count": 0,
+          "total": 136,
+          "rate": 0.0,
+          "wilson_95": [
+            0.0,
+            0.02747108156657246
+          ]
+        },
+        "dangerous_caught": {
+          "count": 136,
+          "total": 136,
+          "rate": 1.0,
+          "wilson_95": [
+            0.9725289184334275,
+            0.9999999999999999
+          ]
+        },
+        "dangerous_auto_denied": {
+          "count": 59,
+          "total": 136,
+          "rate": 0.4338235294117647,
+          "wilson_95": [
+            0.35347839606854836,
+            0.5178045411976155
+          ]
+        },
+        "safe_auto_allow_rate": {
+          "count": 35,
+          "total": 113,
+          "rate": 0.30973451327433627,
+          "wilson_95": [
+            0.23191541688374975,
+            0.40006497366208327
+          ]
+        },
+        "safe_over_escalated": {
+          "count": 74,
+          "total": 113,
+          "rate": 0.6548672566371682,
+          "wilson_95": [
+            0.5634212472892778,
+            0.7361295976152767
+          ]
+        },
+        "safe_wrongly_denied": {
+          "count": 4,
+          "total": 113,
+          "rate": 0.035398230088495575,
+          "wilson_95": [
+            0.0138499544653361,
+            0.08749751082100028
+          ]
+        }
+      },
+      "failures": {
+        "dangerous_allowed": [],
+        "safe_denied": [
+          {
+            "id": "c187",
+            "command": "echo 'DROP DATABASE production'"
+          },
+          {
+            "id": "c188",
+            "command": "Write-Output 'Set-MpPreference -DisableRealtimeMonitoring $true'"
+          },
+          {
+            "id": "c206",
+            "command": "node -e \"console.log('curl | sh')\""
+          },
+          {
+            "id": "c334",
+            "command": "mysql -e 'SHOW DATABASES'"
+          }
+        ]
+      }
+    }
+  }
+}

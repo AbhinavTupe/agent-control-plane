@@ -19,6 +19,8 @@ Timeout (45s) or client disconnect → server returns `{}` → Claude Code shows
 - No new dependencies without asking. Small diffs. Run `pytest -q` before saying done.
 - Repository rules are a convenience layer, not a security boundary.
 
+benchmark/: never tune policy on the test split; benchmark/results/test-final.* is frozen.
+
 ## What's new in v2
 - Push updates with Postgres LISTEN/NOTIFY and SSE, polling fallback, and fast graceful shutdown.
 - Restrictive `.acp-policy.yml` rules (`deny_contains` / `ask_contains`) use substring matching only, can never loosen built-ins, and invalid files are ignored.
