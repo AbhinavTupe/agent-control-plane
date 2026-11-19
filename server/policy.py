@@ -108,7 +108,10 @@ _HIGH_ASK = [
 ]
 
 _RM_RECURSIVE = re.compile(r"\brm\b[^\n;&|]*\s(-[a-zA-Z]*[rR][a-zA-Z]*|--recursive)\b")
-_RM_CATASTROPHIC = {"/", "/*", "~", "~/", "~/*", "$HOME", "$HOME/", "*", ".", "./", "..", "../"}
+_RM_CATASTROPHIC = {
+    "/", "/*", "~", "~/", "~/*", "$HOME", "$HOME/", "$home", "$home/",
+    "*", ".", "./", "..", "../",
+}
 
 _READ_ONLY = {"Read", "Glob", "Grep", "LS", "NotebookRead"}
 _WRITE = {"Write", "Edit", "MultiEdit", "NotebookEdit"}
@@ -116,6 +119,79 @@ _SENSITIVE_PATH = re.compile(
     r"(\.env\b|\.git[\\/]|id_rsa|\.ssh(?:[\\/]|$)|\.pem(?:$|[\\/])|credentials|secrets?)",
     re.I,
 )
+
+
+def _normalize_for_match(cmd: str) -> str:
+    text = cmd.lower()
+    text = text.replace("://", "__scheme__")
+    out = []
+    quote = None
+    i = 0
+    while i < len(text):
+        char = text[i]
+        if char in "'\"":
+            if quote == char:
+                quote = None
+            elif quote is None:
+                quote = char
+            out.append(char)
+        elif char == "^" and quote is None:
+            i += 1
+            if i < len(text):
+                out.append(text[i])
+        elif char == "`":
+            i += 1
+            if i < len(text):
+                out.append(text[i])
+        else:
+            out.append(char)
+        i += 1
+
+    text = "".join(out)
+    text = re.sub(r"(?<=\w)[\"'](?=\w)", "", text)
+    text = re.sub(r"(?<!\w)[\"']{2}(?!\w)", "", text)
+    text = re.sub(r"[\"']{2}", "", text)
+    text = re.sub(r"/{2,}", "/", text)
+    text = re.sub(r"\\{2,}", r"\\", text)
+    text = re.sub(r"\s+", " ", text)
+    text = text.replace("__scheme__", "://")
+    return text.strip()
+
+
+def _split_segments_simple(cmd: str) -> list[str] | None:
+    text = cmd
+    segments = []
+    start = 0
+    quote = None
+    i = 0
+    while i < len(text):
+        char = text[i]
+        if quote:
+            if char == quote:
+                quote = None
+        elif char in "'\"":
+            quote = char
+        elif char in "\r\n":
+            segments.append(text[start:i].strip())
+            start = i + 1
+        elif char == ";":
+            segments.append(text[start:i].strip())
+            start = i + 1
+        elif char == "&":
+            segments.append(text[start:i].strip())
+            start = i + 2 if i + 1 < len(text) and text[i + 1] == "&" else i + 1
+            i = start - 1
+        elif char == "|":
+            segments.append(text[start:i].strip())
+            start = i + 2 if i + 1 < len(text) and text[i + 1] == "|" else i + 1
+            i = start - 1
+        i += 1
+    if quote:
+        return None
+    segments.append(text[start:].strip())
+    if any(not segment for segment in segments):
+        return None
+    return segments
 
 
 def _safe_command_segments(cmd: str) -> list[str] | None:
@@ -179,54 +255,411 @@ def _rm_verdict(cmd: str) -> Verdict | None:
     return Verdict("ask", "high", "recursive delete")
 
 
-def classify_bash(cmd: str) -> Verdict:
-    cmd = (cmd or "").strip()
-    if not cmd:
-        return Verdict("ask", "medium", "empty command")
-    rm = _rm_verdict(cmd)
-    if rm:
-        return rm
+def _strictest(left: Verdict | None, right: Verdict) -> Verdict:
+    if left is None:
+        return right
+    rank = {"allow": 0, "ask": 1, "deny": 2}
+    return right if rank[right.action] > rank[left.action] else left
+
+
+def _literal_text_or_search_segment(cmd: str) -> bool:
+    if re.match(r"^echo\b", cmd, re.I):
+        return not re.search(r"[|;&]", cmd) and not re.search(
+            r"(?:@reboot|\* \* \* \* \*|crontab\b)", cmd, re.I,
+        )
+    return bool(re.match(
+        r"^(?:rg\b|grep\b|git\s+grep\b)",
+        cmd,
+        re.I,
+    )) or bool(re.search(r"^git\s+log\b.*--grep\b", cmd, re.I))
+
+
+def _mask_read_only_search_literals(cmd: str) -> str | None:
+    if "$" in cmd or "`" in cmd:
+        return None
+    try:
+        tokens = shlex.split(cmd)
+    except ValueError:
+        return None
+    if not tokens:
+        return None
+
+    executable = tokens[0].replace("\\", "/").rsplit("/", 1)[-1].lower()
+    if executable in {"rg", "rg.exe", "grep", "grep.exe", "select-string"}:
+        is_search = True
+    elif executable in {"git", "git.exe"} and len(tokens) > 1:
+        subcommand_index = 2 if tokens[1].lower() == "--no-pager" else 1
+        if subcommand_index >= len(tokens):
+            return None
+        subcommand = tokens[subcommand_index].lower()
+        is_search = subcommand == "grep" or (
+            subcommand == "log"
+            and any(
+                token == "--grep" or token.startswith("--grep=")
+                for token in tokens[subcommand_index + 1:]
+            )
+        )
+    else:
+        is_search = False
+    if not is_search:
+        return None
+    if any(
+        re.match(r"^(?:--pre|--hostname-bin|-exec|--output)(?:=|$)", token, re.I)
+        for token in tokens[1:]
+    ):
+        return None
+
+    masked = []
+    quote = None
+    had_quoted_argument = False
+    i = 0
+    while i < len(cmd):
+        char = cmd[i]
+        if quote:
+            if char == quote:
+                quote = None
+                masked.append(char)
+            elif char == "\\" and quote == '"' and i + 1 < len(cmd):
+                masked.extend((" ", " "))
+                i += 1
+            else:
+                masked.append(" ")
+        elif char in "'\"":
+            quote = char
+            had_quoted_argument = True
+            masked.append(char)
+        elif char in "\r\n;&|<>(){}":
+            return None
+        else:
+            masked.append(char)
+        i += 1
+    if quote or not had_quoted_argument:
+        return None
+    return "".join(masked)
+
+
+def _new_deny_verdict(cmd: str) -> Verdict | None:
+    if re.search(r"\b(?:del|erase|rd|rmdir)\b", cmd, re.I) and re.search(r"(?:^|\s)/s(?:\s|$)", cmd, re.I):
+        if re.search(
+            r"(?:[a-z]:[\\/]*(?:\s|$)|"
+            r"[a-z]:[\\/]+(?:windows|users)(?:[\\/]*\*?)?(?:\s|$)|"
+            r"%systemroot%(?:[\\/]|$|\s))",
+            cmd,
+            re.I,
+        ):
+            return Verdict("deny", "high", "recursive delete of a drive root or system path")
+    if re.search(
+        r"\b(?:del|erase|rd|rmdir)\b[^\r\n]*\b/s\b[^\r\n]*"
+        r"(?:[a-z]:[\\/]*(?:\s|$)|"
+        r"[a-z]:[\\/]?(?:windows|users)(?:[\\/]*\*?)?(?:\s|$)|"
+        r"%systemroot%(?:[\\/]|$))",
+        cmd,
+        re.I,
+    ):
+        return Verdict("deny", "high", "recursive delete of a drive root or system path")
+    if re.search(r"^format\s+[a-z]:(?:\s|/|$)", cmd, re.I):
+        return Verdict("deny", "high", "formats a disk volume")
+    if re.search(r"\bcipher\b.*(?:^|\s)/w\s*:", cmd, re.I):
+        return Verdict("deny", "high", "wipes a drive or directory")
+    if re.search(r"\bwipefs\b.*(?:^|\s)-a(?:\s|$)", cmd, re.I):
+        return Verdict("deny", "high", "wipes filesystem signatures")
+    if re.search(r"\bmkfs(?:\.[\w-]+)?\b", cmd, re.I):
+        return Verdict("deny", "high", "formats a filesystem")
+    if re.search(r"\bremove-partition\b", cmd, re.I) or re.search(
+        r"\bclear-disk\b.*-removedata\b", cmd, re.I,
+    ):
+        return Verdict("deny", "high", "removes disk partitions or data")
+
+    if re.search(
+        r"\b(?:del|erase|rd|rmdir)\b[^\r\n]*\b/s\b"
+        r"[^\r\n]*(?:"
+        r"[a-z]:[\\/]*$|"
+        r"[a-z]:[\\/]?(?:windows|users)(?:[\\/]*\*?)?(?:\s|$)|"
+        r"%systemroot%(?:[\\/]|$)"
+        r")",
+        cmd,
+        re.I,
+    ):
+        return Verdict("deny", "high", "recursive delete of a drive root or system path")
+
+    if re.search(r"\bgit\s+reflog\s+expire\b.*--expire\s*=\s*now\b", cmd, re.I):
+        return Verdict("deny", "high", "expires Git reflog history")
+    if re.search(r"\bgit\s+update-ref\s+(?:-[a-z]*d[a-z]*|--delete)\b", cmd, re.I):
+        return Verdict("deny", "high", "deletes a Git reference")
+    if re.search(r"\bgit\s+gc\b.*--prune\s*=\s*now\b", cmd, re.I):
+        return Verdict("deny", "high", "permanently prunes Git objects")
+
+    if re.search(r"\breg(?:\.exe)?\s+add\b.*\\run(?:\\[^ ]*)?(?:\s|$)", cmd, re.I):
+        return Verdict("deny", "high", "adds a Run registry persistence entry")
+    if re.search(r"\bset-itemproperty\b[^\r\n]*\\run(?:\\|\s|:|$)", cmd, re.I):
+        return Verdict("deny", "high", "adds a Run registry persistence entry")
+    if re.search(
+        r"\bschtasks(?:\.exe)?\s+/create\b.*(?:/sc\s+(?:onstart|onlogon)\b|/on(?:start|logon)\b)",
+        cmd,
+        re.I,
+    ):
+        return Verdict("deny", "high", "creates a startup scheduled task")
+    if re.search(
+        r"(?:>\s*|>>\s*|tee\s+)"
+        r"[^\r\n]*(?:/etc/cron\.d/|/etc/crontab|/var/spool/cron)",
+        cmd,
+        re.I,
+    ) or re.search(
+        r"\becho\b.*(?:@reboot|\* \* \* \* \*)[^\r\n]*\|\s*crontab\b",
+        cmd,
+        re.I,
+    ) or re.search(r"\bcrontab\b.*(?:/etc/cron|@reboot)", cmd, re.I):
+        return Verdict("deny", "high", "writes a startup cron entry")
+
+    if re.search(r"\bget-credential\b.*\|\s*export-clixml\b", cmd, re.I):
+        return Verdict("deny", "high", "exports credentials")
+    if re.search(
+        r"(?:cat|type)\b[^\r\n]*"
+        r"(?:~[/\\]\.ssh[/\\](?:id_[\w-]+)|\.ssh[/\\]id_[\w-]+)",
+        cmd,
+        re.I,
+    ):
+        return Verdict("deny", "high", "reads an SSH private key")
+    if re.search(
+        r"(?:cat|type|get-content|gc)\b[^\r\n]*"
+        r"(?:\.aws[/\\]credentials|"
+        r"\.config[/\\]gcloud[/\\]application_default_credentials\.json)",
+        cmd,
+        re.I,
+    ):
+        return Verdict("deny", "high", "reads stored credentials")
+
+    if re.search(r"\brundll32(?:\.exe)?\b.*\bjavascript\s*:", cmd, re.I):
+        return Verdict("deny", "high", "executes JavaScript through rundll32")
+    if re.search(r"\bmshta(?:\.exe)?\b.*https?://", cmd, re.I):
+        return Verdict("deny", "high", "executes remote HTA content")
+    if re.search(r"(?:^|\s)-(?:e|ec|enc|encodedcommand)(?:\s|$)", cmd, re.I):
+        return Verdict("deny", "high", "executes encoded PowerShell")
+
+    if re.search(r"\bbcdedit(?:\.exe)?\b.*\/set\b.*\brecoveryenabled\b", cmd, re.I):
+        return Verdict("deny", "high", "changes boot recovery settings")
+    if re.search(r"\bvssadmin(?:\.exe)?\b.*\bdelete\s+shadows\b", cmd, re.I):
+        return Verdict("deny", "high", "deletes volume shadow copies")
+    if re.search(r"\bwmic(?:\.exe)?\b.*\bshadowcopy\s+delete\b", cmd, re.I):
+        return Verdict("deny", "high", "deletes volume shadow copies")
+    if re.search(r"\bwevtutil(?:\.exe)?\b.*\bcl\b", cmd, re.I):
+        return Verdict("deny", "high", "clears Windows event logs")
+
+    if re.search(
+        r"\bcurl(?:\.exe)?\b.*(?:"
+        r"--upload-file(?:\s|=)|(?:^|\s)-t(?:\s|=)|"
+        r"--data-binary(?:\s|=)[^\r\n]*@|(?:^|\s)-d(?:\s|=)[^\r\n]*@"
+        r")",
+        cmd,
+        re.I,
+    ):
+        return Verdict("deny", "high", "uploads or posts file data")
+
+    if re.search(r"\bdrop\s+database\b", cmd, re.I):
+        return Verdict("deny", "high", "drops a database")
+    if re.search(r"\b(?:redis-cli\b.*\bflush(?:all|db)\b|flush(?:all|db)\b)", cmd, re.I):
+        return Verdict("deny", "high", "flushes Redis data")
+    if re.search(
+        r"\bmongo(?:db)?\b[^\r\n]*(?:\bdropdatabase\s*\(|\.drop\s*\(|dropdatabase\s*\b)",
+        cmd,
+        re.I,
+    ):
+        return Verdict("deny", "high", "drops MongoDB data")
+
+    if "/dev/tcp" in cmd:
+        return Verdict("deny", "high", "uses a reverse-shell TCP device")
+    if re.search(r"\b(?:nc|ncat)(?:\.exe)?\b.*(?:-e\b|--exec\b)", cmd, re.I):
+        return Verdict("deny", "high", "executes a process through a network connection")
+    if re.search(
+        r"(?:python(?:3)?\b|ruby\b|perl\b)[^\r\n]*"
+        r"(?:socket|tcpsocket|fsockopen)[^\r\n]*(?:exec|dup2|popen|open\s*\(|getstream)",
+        cmd,
+        re.I,
+    ):
+        return Verdict("deny", "high", "combines a network socket with process execution")
+
+    if re.search(r"\b(?:iwr|invoke-webrequest|irm|invoke-restmethod)\b[^\r\n]*\|"
+                 r"\s*(?:iex|invoke-expression)\b", cmd, re.I):
+        return Verdict("deny", "high", "executes downloaded content")
+    if re.search(r"\b(?:curl|wget)\b[^\r\n]*\|\s*(?:sudo\s+)?(?:ba|z|da)?sh\b", cmd, re.I):
+        return Verdict("deny", "high", "piping a download into a shell")
+    return None
+
+
+def _whole_string_deny_verdict(cmd: str, powershell: bool) -> Verdict | None:
+    verdict = None
+
+    recursive_delete = _rm_verdict(cmd)
+    if recursive_delete and recursive_delete.action == "deny":
+        verdict = _strictest(verdict, recursive_delete)
+
+    new_deny = _new_deny_verdict(cmd)
+    if new_deny:
+        verdict = _strictest(verdict, new_deny)
+
+    if powershell:
+        if _PS_GIT_FORCE.search(cmd):
+            verdict = _strictest(
+                verdict,
+                Verdict("deny", "high", "force push can destroy remote history"),
+            )
+        remove = _PS_REMOVE.search(cmd)
+        if remove:
+            args = remove.group(1)
+            if (
+                re.search(r"(?<!\S)-Recurse\b", args, re.I)
+                and re.search(r"(?<!\S)-Force\b", args, re.I)
+                and _PS_DANGEROUS_TARGET.search(args)
+            ):
+                verdict = _strictest(
+                    verdict,
+                    Verdict("deny", "high", "recursive delete of root or home"),
+                )
+        if re.search(r"\bFormat-Volume\b", cmd, re.I):
+            verdict = _strictest(verdict, Verdict("deny", "high", "formats a volume"))
+        if _PS_EXECUTE.search(cmd) and _PS_DOWNLOAD.search(cmd):
+            verdict = _strictest(
+                verdict,
+                Verdict("deny", "high", "executes downloaded content"),
+            )
+
     for rx, why in _BLOCK:
         if rx.search(cmd):
-            return Verdict("deny", "high", why)
-    for rx, why in _HIGH_ASK:
-        if rx.search(cmd):
-            return Verdict("ask", "high", why)
-    if _safe_command_segments(cmd):
-        return Verdict("allow", "low", "read-only or test command")
-    return Verdict("ask", "medium", "needs human review")
+            verdict = _strictest(verdict, Verdict("deny", "high", why))
+    return verdict
+
+
+def classify_bash(cmd: str) -> Verdict:
+    original = (cmd or "").strip()
+    if not original:
+        return Verdict("ask", "medium", "empty command")
+    masked = _mask_read_only_search_literals(original)
+    normalized = _normalize_for_match(masked if masked is not None else original)
+    strictest = _whole_string_deny_verdict(normalized, powershell=False)
+    if re.search(r"\btruncate\s+(?:table|database|schema)\b", normalized, re.I):
+        strictest = _strictest(
+            strictest,
+            Verdict("ask", "high", "destructive SQL"),
+        )
+    if "\n" in original or "\r" in original:
+        return _strictest(strictest, Verdict("ask", "medium", "newline-separated command"))
+    segments = _split_segments_simple(original)
+    if segments is None:
+        return _strictest(strictest, Verdict("ask", "medium", "needs human review"))
+
+    for segment in segments:
+        match_segment = normalized if masked is not None else _normalize_for_match(segment)
+        if _literal_text_or_search_segment(match_segment) and not (
+            masked is not None and _safe_command_segments(segment)
+        ):
+            verdict = Verdict("ask", "high", "literal text or read-only search")
+        else:
+            verdict = None
+            rm = _rm_verdict(match_segment)
+            if rm:
+                verdict = rm
+            if re.search(r"\b(?:chmod|chown)\s+-r\b", match_segment, re.I):
+                verdict = _strictest(
+                    verdict,
+                    Verdict("ask", "high", "recursive permission change"),
+                )
+            if re.search(r"\btruncate\s+(?:table|database|schema)\b", match_segment, re.I):
+                verdict = _strictest(
+                    verdict,
+                    Verdict("ask", "high", "destructive SQL"),
+                )
+            new_deny = _new_deny_verdict(match_segment)
+            if new_deny:
+                verdict = _strictest(verdict, new_deny)
+            if verdict is None:
+                for rx, why in _BLOCK:
+                    if rx.search(match_segment):
+                        verdict = Verdict("deny", "high", why)
+                        break
+            if verdict is None:
+                for rx, why in _HIGH_ASK:
+                    if rx.search(match_segment):
+                        verdict = Verdict("ask", "high", why)
+                        break
+            if verdict is None:
+                if _safe_command_segments(segment):
+                    verdict = Verdict("allow", "low", "read-only or test command")
+                else:
+                    verdict = Verdict("ask", "medium", "needs human review")
+        strictest = _strictest(strictest, verdict)
+    return strictest or Verdict("ask", "medium", "needs human review")
 
 
 def classify_powershell(cmd: str) -> Verdict:
-    cmd = (cmd or "").strip()
-    if not cmd:
+    original = (cmd or "").strip()
+    if not original:
         return Verdict("ask", "medium", "empty command")
-    if _PS_GIT_FORCE.search(cmd):
-        return Verdict("deny", "high", "force push can destroy remote history")
-    remove = _PS_REMOVE.search(cmd)
-    if remove:
-        args = remove.group(1)
-        if (
-            re.search(r"(?<!\S)-Recurse\b", args, re.I)
-            and re.search(r"(?<!\S)-Force\b", args, re.I)
-            and _PS_DANGEROUS_TARGET.search(args)
+    masked = _mask_read_only_search_literals(original)
+    normalized = _normalize_for_match(masked if masked is not None else original)
+    strictest = _whole_string_deny_verdict(normalized, powershell=True)
+    if "\n" in original or "\r" in original:
+        return _strictest(strictest, Verdict("ask", "medium", "newline-separated command"))
+    segments = _split_segments_simple(original)
+    if segments is None:
+        return _strictest(strictest, Verdict("ask", "medium", "needs human review"))
+
+    for segment in segments:
+        match_segment = normalized if masked is not None else _normalize_for_match(segment)
+        if _literal_text_or_search_segment(match_segment) and not (
+            masked is not None and _safe_command_segments(segment)
         ):
-            return Verdict("deny", "high", "recursive delete of root or home")
-    if re.search(r"\bFormat-Volume\b", cmd, re.I):
-        return Verdict("deny", "high", "formats a volume")
-    if _PS_DOWNLOAD_PIPE.search(cmd) or (
-        _PS_EXECUTE.search(cmd) and _PS_DOWNLOAD.search(cmd)
-    ):
-        return Verdict("deny", "high", "executes downloaded content")
-    for rx, why in _BLOCK:
-        if rx.search(cmd):
-            return Verdict("deny", "high", why)
-    for rx, why in _HIGH_ASK:
-        if rx.search(cmd):
-            return Verdict("ask", "high", why)
-    if _safe_command_segments(cmd):
-        return Verdict("allow", "low", "read-only or test command")
-    return Verdict("ask", "medium", "needs human review")
+            verdict = Verdict("ask", "high", "literal text or read-only search")
+        else:
+            verdict = None
+            if _PS_GIT_FORCE.search(match_segment):
+                verdict = Verdict("deny", "high", "force push can destroy remote history")
+            if re.search(r"\b(?:chmod|chown)\s+-r\b", match_segment, re.I):
+                verdict = _strictest(
+                    verdict,
+                    Verdict("ask", "high", "recursive permission change"),
+                )
+            remove = _PS_REMOVE.search(match_segment)
+            if remove:
+                args = remove.group(1)
+                if (
+                    re.search(r"(?<!\S)-Recurse\b", args, re.I)
+                    and re.search(r"(?<!\S)-Force\b", args, re.I)
+                    and _PS_DANGEROUS_TARGET.search(args)
+                ):
+                    verdict = _strictest(
+                        verdict,
+                        Verdict("deny", "high", "recursive delete of root or home"),
+                    )
+            if re.search(r"\bFormat-Volume\b", match_segment, re.I):
+                verdict = _strictest(
+                    verdict,
+                    Verdict("deny", "high", "formats a volume"),
+                )
+            if _PS_EXECUTE.search(match_segment) and _PS_DOWNLOAD.search(match_segment):
+                verdict = _strictest(
+                    verdict,
+                    Verdict("deny", "high", "executes downloaded content"),
+                )
+            new_deny = _new_deny_verdict(match_segment)
+            if new_deny:
+                verdict = _strictest(verdict, new_deny)
+            if verdict is None:
+                for rx, why in _BLOCK:
+                    if rx.search(match_segment):
+                        verdict = Verdict("deny", "high", why)
+                        break
+            if verdict is None:
+                for rx, why in _HIGH_ASK:
+                    if rx.search(match_segment):
+                        verdict = Verdict("ask", "high", why)
+                        break
+            if verdict is None:
+                if _safe_command_segments(segment):
+                    verdict = Verdict("allow", "low", "read-only or test command")
+                else:
+                    verdict = Verdict("ask", "medium", "needs human review")
+        strictest = _strictest(strictest, verdict)
+    return strictest or Verdict("ask", "medium", "needs human review")
 
 
 def _path(tool_input: dict) -> str:

@@ -64,7 +64,7 @@
   {"command":"terraform destroy -auto-approve -target=module.cache","shell":"Bash","expected":"deny","note":"Destroy a managed infrastructure module without confirmation."},
   {"command":"kubectl delete namespace staging","shell":"Bash","expected":"ask","note":"context-dependent; human decides. Delete an entire Kubernetes namespace."},
   {"command":"aws s3 rm s3://archive-prod --recursive","shell":"Bash","expected":"ask","note":"context-dependent; human decides. Recursively delete remote object storage."},
-  {"command":"DROP DATABASE analytics;","shell":"Bash","expected":"ask","note":"context-dependent; human decides. Drop a database."},
+  {"command":"DROP DATABASE analytics;","shell":"Bash","expected":"deny","note":"drops a database"},
   {"command":"TRUNCATE TABLE audit_events;","shell":"Bash","expected":"ask","note":"context-dependent; human decides. Delete every row from an audit table."},
   {"command":"rm -rf .","shell":"Bash","expected":"deny","note":"Recursively delete the current working tree."},
   {"command":"rm -r ..","shell":"Bash","expected":"deny","note":"Recursively delete the parent working directory."},

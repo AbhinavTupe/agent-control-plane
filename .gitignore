@@ -7,3 +7,4 @@ node_modules/
 docs/settings.local.json
 .github/hooks/acp.json
 .github/hooks/acp.json.bak
+scratchpad/
