@@ -25,6 +25,8 @@ def test_dashboard_is_served_without_database():
     assert response.status_code == 200
     assert response.headers["content-type"].startswith("text/html")
     assert response.headers["cache-control"] == "no-store"
+    assert "opinion.textContent" in response.text
+    assert "opinion.innerHTML" not in response.text
 
 
 @pytest.mark.parametrize("host", [f"127.0.0.1:{PORT}", f"localhost:{PORT}"])

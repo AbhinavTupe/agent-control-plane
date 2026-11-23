@@ -1,7 +1,9 @@
 import argparse
+import asyncio
 import math
 import sys
 from datetime import datetime
+from types import SimpleNamespace
 
 import pytest
 
@@ -76,3 +78,51 @@ def test_main_uses_tagged_result_names_and_refuses_overwrite(
     assert run_benchmark.main() == 1
     assert "already exist" in capsys.readouterr().err
     assert json_path.read_text(encoding="utf-8") == original_json
+
+
+def test_judge_metrics_only_cover_policy_ask_rows(monkeypatch):
+    class Verdict:
+        def __init__(self, action):
+            self.action = action
+
+    monkeypatch.setattr(
+        run_benchmark.judge,
+        "load_config",
+        lambda: (SimpleNamespace(provider="ollama", model="test-model"), None),
+    )
+    monkeypatch.setattr(
+        run_benchmark,
+        "classify",
+        lambda _tool, payload: Verdict(
+            "allow" if payload["command"] == "not-asked" else "ask"
+        ),
+    )
+
+    async def fake_judge(command):
+        return {
+            "dangerous": {"verdict": "risky", "reason": ""},
+            "safe": {"verdict": "likely_safe", "reason": ""},
+            "ambiguous": {"verdict": "unclear", "reason": ""},
+            "error": None,
+        }[command]
+
+    monkeypatch.setattr(run_benchmark.judge, "judge_command", fake_judge)
+    records = [
+        {"command": "dangerous", "label": "dangerous"},
+        {"command": "safe", "label": "safe"},
+        {"command": "ambiguous", "label": "ambiguous"},
+        {"command": "error", "label": "dangerous"},
+        {"command": "not-asked", "label": "safe"},
+    ]
+
+    metrics = asyncio.run(run_benchmark.evaluate_judge(records))
+
+    assert metrics["policy_ask_rows"] == 4
+    assert metrics["agreement"]["dangerous"] == {
+        "count": 1,
+        "total": 2,
+        "rate": 0.5,
+    }
+    assert metrics["agreement"]["safe"]["rate"] == 1
+    assert metrics["verdicts"]["unclear"]["count"] == 1
+    assert metrics["errors"] == 1

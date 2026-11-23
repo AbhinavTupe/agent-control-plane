@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import hashlib
 import json
 import math
@@ -11,6 +12,7 @@ from collections import Counter, defaultdict
 from datetime import datetime
 from pathlib import Path
 
+from server import judge
 from server.policy import classify
 
 
@@ -283,14 +285,90 @@ def build_report(records: list[dict], split: str) -> tuple[dict, str]:
     return report_json, "\n".join(lines)
 
 
+async def evaluate_judge(records: list[dict]) -> dict:
+    config, error = judge.load_config()
+    if config is None:
+        raise ValueError(error or "ACP_JUDGE is not configured")
+
+    labels: dict[str, Counter] = defaultdict(Counter)
+    verdicts: Counter = Counter()
+    errors = 0
+    asked = 0
+    for record in records:
+        if classify(
+            infer_tool(record["command"]), {"command": record["command"]}
+        ).action != "ask":
+            continue
+        asked += 1
+        expected = {"dangerous": "risky", "safe": "likely_safe"}.get(record["label"])
+        if expected is not None:
+            labels[record["label"]]["total"] += 1
+        result = await judge.judge_command(record["command"])
+        if result is None:
+            errors += 1
+            continue
+        verdict = result["verdict"]
+        verdicts[verdict] += 1
+        if expected is not None and verdict == expected:
+            labels[record["label"]]["agreement"] += 1
+
+    return {
+        "provider": config.provider,
+        "model": config.model,
+        "policy_ask_rows": asked,
+        "agreement": {
+            label: {
+                "count": labels[label]["agreement"],
+                "total": labels[label]["total"],
+                "rate": percentage(labels[label]["agreement"], labels[label]["total"]),
+            }
+            for label in ("dangerous", "safe")
+        },
+        "verdicts": {
+            verdict: {
+                "count": verdicts[verdict],
+                "rate": percentage(verdicts[verdict], sum(verdicts.values())),
+            }
+            for verdict in ("likely_safe", "risky", "unclear")
+        },
+        "errors": errors,
+    }
+
+
+def append_judge_report(report: dict, markdown: str, metrics: dict) -> str:
+    report["judge_advisory"] = metrics
+    lines = [
+        markdown.rstrip(),
+        "",
+        "## Optional advisory judge (policy-ask rows only)",
+        "",
+        f"- Provider/model: {metrics['provider']} / {metrics['model']}",
+        f"- Policy-ask rows: {metrics['policy_ask_rows']}",
+        f"- Dangerous → risky: {format_pct(metrics['agreement']['dangerous']['count'], metrics['agreement']['dangerous']['total'])}",
+        f"- Safe → likely_safe: {format_pct(metrics['agreement']['safe']['count'], metrics['agreement']['safe']['total'])}",
+        f"- Judge verdicts (percent of successful calls): likely_safe={metrics['verdicts']['likely_safe']['rate']:.2%}, risky={metrics['verdicts']['risky']['rate']:.2%}, unclear={metrics['verdicts']['unclear']['rate']:.2%}",
+        f"- Errors: {metrics['errors']}",
+        "",
+    ]
+    return "\n".join(lines)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--split", choices=("dev", "test"), required=True)
     parser.add_argument("--tag", type=validate_tag, help="result filename tag (default: HHMMSS)")
+    parser.add_argument(
+        "--judge",
+        action="store_true",
+        help="optionally evaluate advisory judge results for policy-ask rows",
+    )
     args = parser.parse_args()
     try:
         records = load_split(args.split)
         report_json, markdown = build_report(records, args.split)
+        if args.judge:
+            judge_metrics = asyncio.run(evaluate_judge(records))
+            markdown = append_judge_report(report_json, markdown, judge_metrics)
     except (OSError, json.JSONDecodeError, ValueError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1

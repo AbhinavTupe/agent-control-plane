@@ -38,6 +38,7 @@ from .notify import (
     log_enabled_channels,
     schedule_human_decision,
 )
+from . import judge
 from .policy import (
     Verdict,
     classify,
@@ -147,6 +148,9 @@ def compute_agent_state(
 async def lifespan(app: FastAPI):
     _install_access_log_filter()
     log_enabled_channels()
+    warning = judge.startup_warning()
+    if warning:
+        logger.warning("%s", warning)
     pool = AsyncConnectionPool(
         DATABASE_URL, min_size=1, max_size=10, open=False,
         kwargs={"row_factory": dict_row, "autocommit": True},
@@ -201,6 +205,21 @@ async def _embed_approval(pool: AsyncConnectionPool, aid: int, text: str) -> Non
             "approval embedding failed: %s",
             (str(exc).splitlines() or [type(exc).__name__])[0],
         )
+
+
+async def _judge_approval(app: FastAPI, aid: int, command: str) -> None:
+    try:
+        result = await judge.judge_command(command)
+    except Exception:
+        result = None
+    if result is None:
+        judge.STORE.fail_approval(aid)
+        return
+    judge.STORE.complete_approval(aid, command, result)
+    try:
+        await notify_changed(app.state.pool)
+    except Exception:
+        pass
 
 
 def _valid_session(session_id: str | None) -> bool:
@@ -634,6 +653,16 @@ async def _permission(
         aid = (await cur.fetchone())["id"]
     _schedule_notification(request.app)
     if initial == "pending":
+        command = tin.get("command")
+        if (
+            tool != "ask_user"
+            and isinstance(command, str)
+            and command.strip()
+            and judge.is_configured()
+        ):
+            should_judge = judge.STORE.begin_approval(aid, command)
+            if should_judge:
+                _schedule_task(request.app, _judge_approval(request.app, aid, command))
         try:
             schedule_human_decision(
                 DecisionNotification(
@@ -795,6 +824,10 @@ async def list_approvals(request: Request, status: str = "pending", limit: int =
         )
     for approval in approvals:
         approval["folder"] = folder_name(approval["cwd"])
+        if judge.is_configured():
+            opinion = judge.STORE.get_approval(approval["id"])
+            if opinion is not None:
+                approval["ai_opinion"] = opinion
         if status == "pending":
             if approval["tool_name"] == "ask_user":
                 approval["question_fields"] = parse_question_fields(approval["tool_input"])

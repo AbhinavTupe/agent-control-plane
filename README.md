@@ -111,6 +111,37 @@ Open <http://127.0.0.1:8787>.
 | `ACP_SIM_MIN` | `0.80` |
 | `ACP_TOKEN` | Optional; takes precedence over `.acp-token` when non-empty |
 
+### Advisory LLM judge
+
+The advisory judge is built but **unverified against a real model**. It is off
+by default (`ACP_JUDGE` unset or `off`), makes no network calls while off, and
+never changes policy, approval defaults, or batch decisions. It runs only in the
+background for command approvals already marked `ask`; its opinion is display
+text for the human reviewer. Results are held in an in-memory TTL cache keyed by
+approval ID and normalized-command hash, not in the database.
+
+To try it locally with Ollama, start Ollama and pull a model, then set:
+
+```powershell
+ollama pull llama3.2
+$env:ACP_JUDGE = "ollama"
+$env:ACP_JUDGE_MODEL = "llama3.2"
+.\.venv\Scripts\python.exe -m scripts.judge_check
+```
+
+Ollama uses `http://127.0.0.1:11434/api/chat` by default; `ACP_JUDGE_URL` can
+override it. The OpenAI-compatible `openai` mode requires `ACP_JUDGE_URL`,
+`ACP_JUDGE_MODEL`, and a key from `ACP_JUDGE_KEY` or the ignored
+`.acp-judge-key` file. **OpenAI mode sends command text outside this machine**;
+the server logs a startup warning when that mode is selected. Before sending,
+the judge redacts common credential forms and long token-like strings and caps
+the command text at 2,000 characters. Requests time out after 8 seconds, at
+most two run concurrently, and errors produce no opinion.
+
+`python -m benchmark.run_benchmark --split dev --judge` optionally reports
+agreement only for rows the policy marked `ask`; this is separate from policy
+metrics. Benchmark use is opt-in and should not be run on the frozen test split.
+
 ### Dashboard login
 
 Set a token with `.\.venv\Scripts\python.exe -m scripts.set_token`; use `--force` to replace an existing `.acp-token`. The command prints only the file path. The server and hooks use a non-empty `ACP_TOKEN` environment variable first, otherwise the stripped first line of `.acp-token` in the repository root. If both are missing or empty, login is disabled and the existing open-dashboard behavior is unchanged.

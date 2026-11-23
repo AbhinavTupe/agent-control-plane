@@ -3,6 +3,7 @@ __pycache__/
 .venv/
 .env
 .acp-token
+.acp-judge-key
 .pytest_cache/
 node_modules/
 docs/settings.local.json

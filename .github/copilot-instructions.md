@@ -30,7 +30,7 @@ benchmark/: never tune policy on the test split; benchmark/results/test-final.* 
 - Similar-decision hints show real human decisions first; synthetic seeds are badged "example".
 - Codex, Cursor, and Antigravity shell adapters share the existing approval flow; install with `python -m scripts.install_hook --agent <codex|cursor|antigravity|all>`. User scope is available for those three agents; Copilot remains project-scoped.
 - Evaluation: 112 cases and 0 unsafe auto-allows. This is a regression suite, not an independent benchmark.
-- Automated tests: 766 passing.
+- Automated tests: 826 passing. Advisory LLM judge: built, off by default, unverified against a real model; never affects policy decisions.
 
 ## Commands
 ```

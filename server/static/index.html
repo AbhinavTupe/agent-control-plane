@@ -293,6 +293,19 @@
           summary.textContent = text(approval.summary);
           card.appendChild(summary);
 
+          if (approval.ai_opinion) {
+            const opinion = document.createElement("p");
+            opinion.className = "ai-opinion";
+            if (approval.ai_opinion.status === "pending") {
+              opinion.textContent = "AI opinion (advisory, you decide): analysing…";
+            } else if (approval.ai_opinion.status === "complete") {
+              opinion.textContent = "AI opinion (advisory, you decide): "
+                + text(approval.ai_opinion.verdict) + " — "
+                + text(approval.ai_opinion.reason);
+            }
+            if (opinion.textContent) card.appendChild(opinion);
+          }
+
           const similar = document.createElement("div");
           similar.className = "similar";
           card.appendChild(similar);
